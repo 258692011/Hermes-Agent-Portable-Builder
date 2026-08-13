@@ -578,6 +578,18 @@ function Resolve-OrInstallGit([string]$Root) {
     Install-PortableGit $Root
 }
 
+# Delete the staged Portable directory BEFORE any build work (user-requested
+# 2026-08-13, refined the same day to target $Stage only — the stage parent is
+# a plain container and is expected to stay empty): fail fast when the
+# previous staged tree is still occupied by a running process (e.g. a Portable
+# launched from it) instead of discovering it after the Desktop/TUI/Web builds
+# finish. Accepted trade-off: a failed build no longer preserves the previous
+# staged tree for inspection.
+Remove-TreeSafe $Stage
+if (Test-Path $Stage) {
+    throw "Staging tree could not be fully removed at script start: $Stage (a process is holding files, e.g. a portable launched from it). Close such processes and retry — a partial stage poisons the fresh build."
+}
+
 $selector = Read-OfficialPythonSelector
 $nodeSelector = Read-OfficialNodeSelector
 
@@ -649,10 +661,6 @@ if (Test-Path (Join-Path $Repo '.git')) {
 $BuiltApp = Join-Path $Repo 'apps\desktop\release\win-unpacked'
 if (-not (Test-Path (Join-Path $BuiltApp 'Hermes.exe'))) { throw 'Built Desktop is missing.' }
 
-Remove-TreeSafe $StageParent
-if (Test-Path $Stage) {
-    throw "Staging tree could not be fully removed: $Stage (a process is holding files, e.g. a portable launched from it). Close such processes and retry — a partial stage poisons the fresh build."
-}
 New-Item -ItemType Directory -Force $Stage | Out-Null
 Copy-Tree $BuiltApp (Join-Path $Stage 'app')
 New-Item -ItemType File -Force (Join-Path $Stage 'app\portable.marker') | Out-Null

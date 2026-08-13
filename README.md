@@ -1,6 +1,6 @@
 # Hermes Agent Portable Builder
 
-此目录是本机 Portable 构建系统，**不是**官方 Git 仓库的一部分；官方源码的 checkout 只存放在 `upstream\` 子目录中
+此目录是本机 Portable 构建系统，**不是**官方 Git 仓库的一部分；官方源码只存放在 `upstream\` 子目录中
 
 目录职责：
 
@@ -83,7 +83,7 @@ Node、Git 和 Electron 混装。缺少 uv 时用固定的 0.12.3；Python 依�
 
 构建脚本会临时修改官方 Desktop 源码，构建结束后立即移除补丁，修改内容详见下文
 「构建对官方源码的修改」章节。构建项目的完整覆盖层只保留在
-构建机的 `builder\`，不会复制到成品或内嵌官方 Git checkout。Builder 管理的成品 data 种子源码位于
+构建机的 `builder\`，不会复制到成品或内嵌官方 Git 源码。Builder 管理的成品 data 种子源码位于
 `builder\data\`（`hermes-home\memories\`、`hermes-home\skills\` 等），整个目录树按原结构复制到成品对应的 `data\`
 
 技能目录中的 `SKILL.md` 与 `references\` 会按原结构复制（自 2026-08-12 起不再强制要求技能存在或精简，`hermes-portable-builder` 技能门禁已移除）。Portable 运行维护脚本
@@ -209,10 +209,10 @@ display:
 - 补丁必须标记包围、可重复应用、可完整撤销；撤销后源码与官方逐字节一致（`git status --porcelain` 为空）
 - 随包发布的 `scripts\*.ps1`（含补丁脚本）与 `builder\` 源码 byte-identical；改动后需重新构建
   同步全部副本，不得只改部署侧
-- 上述修改只存在于构建窗口期；发布 ZIP 内嵌的官方 checkout 保持官方原样
+- 上述修改只存在于构建窗口期；发布 ZIP 内嵌的官方源码保持官方原样
 - 更新流程同样不留补丁：`Update-Portable.ps1 -Stage SyncDesktop` 在桌面同步（原子交换）完成后自动执行
   `-Stage PatchRemove` 自清理；`Update.exe` 在官方 `hermes update` 前另有
-  `-Remove` + `git clean -fd` 兜底。因此无论构建还是更新路径，内嵌 checkout 都以干净状态收尾，
+  `-Remove` + `git clean -fd` 兜底。因此无论构建还是更新路径，内嵌源码都以干净状态收尾，
   绕过 Update.exe 直接运行官方 `hermes update` 也不会触发 "Restore local changes now? [Y/n]" stash 提示
 
 ## 同步官方

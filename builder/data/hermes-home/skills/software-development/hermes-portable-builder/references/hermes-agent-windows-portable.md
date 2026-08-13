@@ -122,7 +122,7 @@ The child process receives an explicit `HERMES_HOME` so Electron and Python do n
 Audited order in `resolveHermesBackend()`:
 
 1. `HERMES_DESKTOP_HERMES_ROOT`
-2. development source checkout
+2. 开发源码
 3. managed install at `HERMES_HOME\hermes-agent`
 4. `HERMES_DESKTOP_HERMES` or `hermes` on PATH
 5. system Python that can import `hermes_cli`
@@ -256,12 +256,12 @@ The complete x64 bundle included:
 
 - Electron Desktop unpacked build
 - CPython selected from the current official Windows installer `scripts/install.ps1` `$PythonVersion` and provisioned under `runtime/python`
-- Hermes source checkout and locked Python dependencies
+- Hermes 源码 and locked Python dependencies
 - Node.js 22 x64 under `HERMES_HOME/node`
 - PortableGit x64 under `HERMES_HOME/git`
 - managed `uv.exe`
 
-Build-only `node_modules` and stale Electron `release/dist` trees inside the embedded source checkout can be removed after packaging to reduce archive size. **Do not delete Git-tracked source files** (including `apps/desktop`, docs, tests, or bootstrap sources): their absence is recorded as local deletion, so `hermes update` autostashes thousands of paths and asks whether to restore them. Retain the complete tracked checkout plus runtime Python, dependency payload, and application artifact. Before archiving, require:
+Build-only `node_modules` and stale Electron `release/dist` trees inside the 内嵌源码 can be removed after packaging to reduce archive size. **Do not delete Git-tracked source files** (including `apps/desktop`, docs, tests, or bootstrap sources): their absence is recorded as local deletion, so `hermes update` autostashes thousands of paths and asks whether to restore them. Retain the complete 被跟踪的源码 plus runtime Python, dependency payload, and application artifact. Before archiving, require:
 
 ```powershell
 git status --porcelain   # no output
@@ -271,7 +271,7 @@ git config core.autocrlf false
 git config core.eol lf
 ```
 
-When a deep Windows checkout cannot restore tracked files due to `Filename too long`, temporarily map the checkout with `subst`, run `git reset --hard HEAD` through the short drive, then remove the mapping and re-check status.
+When a 深层 Windows 源码 cannot restore tracked files due to `Filename too long`, temporarily map the 源码 with `subst`, run `git reset --hard HEAD` through the short drive, then remove the mapping and re-check status.
 
 ## Updater compatibility: launch portability is not update portability
 
@@ -288,7 +288,7 @@ Failed to inspect Python interpreter from active virtual environment
 Broken Python trampoline at venv\Scripts\python.exe
 ```
 
-The Git pull can already have advanced `HEAD`, and the ZIP fallback can already have copied source files, while dependency installation remains incomplete. The checkout may contain `.update-incomplete`; subsequent launches then retry repair and log `Could not auto-recover`. Meanwhile Desktop can appear functional because the relative wrapper directly launches bundled CPython with retained `site-packages`. Treat that state as **source refreshed, runtime update incomplete**.
+The Git pull can already have advanced `HEAD`, and the ZIP fallback can already have copied source files, while dependency installation remains incomplete. The 源码 may contain `.update-incomplete`; subsequent launches then retry repair and log `Could not auto-recover`. Meanwhile Desktop can appear functional because the relative wrapper directly launches bundled CPython with retained `site-packages`. Treat that state as **source refreshed, runtime update incomplete**.
 
 A Portable updater must therefore:
 
@@ -296,7 +296,7 @@ A Portable updater must therefore:
 2. snapshot `data/` and record the current commit/version;
 3. avoid passing a broken retained venv through `VIRTUAL_ENV`;
 4. probe imports and recreate the venv with bundled CPython + locked dependencies when unhealthy, retaining rollback until verification passes;
-5. remove the marker-bounded generated Portable patch before upstream update and require a truly clean checkout (`git status --porcelain` and `git stash list` both empty); do not answer an autostash restore prompt as the normal fix;
+5. remove the marker-bounded generated Portable patch before upstream update and require a truly 干净源码 (`git status --porcelain` and `git stash list` both empty); do not answer an autostash restore prompt as the normal fix;
 6. run the official source update only after that target is healthy and distinguish network failure from runtime repair failure;
 7. reapply the same patch idempotently after the update using explicit UTF-8 decoding (PowerShell 5.1 `Get-Content` can corrupt non-ASCII source comments); `-Remove` must be a success when the patch/source is already absent;
 8. build `apps/desktop/release/win-unpacked`, validate `Hermes.exe`, and atomically synchronize it into the external Portable `app/` directory with rollback;
@@ -319,7 +319,7 @@ Do not consider the update path fully verified until a real upstream update or c
 
 A Portable release must distinguish runtime payload from user state. Do not archive a staging tree after launching it unless writable state is sanitized again.
 
-For a fresh Hermes Desktop ZIP, keep `data/electron-user-data/` empty. Under `data/hermes-home/`, retain the complete official `hermes-agent` checkout, bundled `node`, bundled `git`, managed `bin` tools, and an intentional minimal `config.yaml`; exclude `.env`, `auth.json`, `state.db*`, sessions, logs, memories, caches, state snapshots, profiles, pairing state, and other test/user artifacts.
+For a fresh Hermes Desktop ZIP, keep `data/electron-user-data/` empty. Under `data/hermes-home/`, retain the complete 官方 `hermes-agent` 源码, bundled `node`, bundled `git`, managed `bin` tools; the archive ships WITHOUT `config.yaml` — the stage is assembled from an unlaunched upstream 源码 so the file never exists in the normal flow, and the build fail-closes around it (early defensive `$ConfigPath` remove + throw in `Build-Hermes-Portable.ps1`, plus the contract gate's final absence check; verified 2026-08-13). The first-run launcher writes the minimal `config.yaml` (`display.language: zh`) only when the file is absent (`Hermes-Desktop.cs::EnsureFirstRunConfig` `FileMode.CreateNew`), so user config is never overwritten. Exclude `.env`, `auth.json`, `state.db*`, sessions, logs, memories, caches, state snapshots, profiles, pairing state, and other test/user artifacts.
 
 Hermes Desktop persists onboarding decisions in Electron localStorage. At the July 2026 source baseline the relevant keys are:
 
@@ -348,14 +348,14 @@ A full platform test suite may contain upstream POSIX fixture failures on Window
 
 ## External Builder-owned release templates and contract gate
 
-`D:\Hermes-Agent-Portable-Builder\builder` carries these inputs outside the official checkout. The build installs the non-official skill at `<portable-root>\data\hermes-home\skills\software-development\hermes-portable-builder`; official source remains under `upstream` / `data\hermes-home\hermes-agent` with no Portable commits:
+`D:\Hermes-Agent-Portable-Builder\builder` carries these inputs outside the 官方源码. The build installs the non-official skill at `<portable-root>\data\hermes-home\skills\software-development\hermes-portable-builder`; official source remains under `upstream` / `data\hermes-home\hermes-agent` with no Portable commits:
 
 - `templates/hermes-cli.cmd` — pointer-only CLI launcher; never hard-codes a CPython patch directory.
-- `scripts/Update-Portable.ps1` — the merged repair/update helper (single script, `-Stage Repair|Patch|PatchRemove|SyncDesktop`) that parses the embedded checkout's current `scripts/install.ps1` `$PythonVersion`, passes it to `uv python install/find`, validates major/minor, rebuilds the venv, and updates `current.txt` transactionally; the Patch/PatchRemove stages apply/remove the marker-bounded Desktop source patch (build-time `-RepoPath`, deployed `-PortableRoot`); the SyncDesktop stage rebuilds Desktop/TUI/Web and atomically swaps `app`.
+- `scripts/Update-Portable.ps1` — the merged repair/update helper (single script, `-Stage Repair|Patch|PatchRemove|SyncDesktop`) that parses the embedded 源码的 current `scripts/install.ps1` `$PythonVersion`, passes it to `uv python install/find`, validates major/minor, rebuilds the venv, and updates `current.txt` transactionally; the Patch/PatchRemove stages apply/remove the marker-bounded Desktop source patch (build-time `-RepoPath`, deployed `-PortableRoot`); the SyncDesktop stage rebuilds Desktop/TUI/Web and atomically swaps `app`.
 - `templates/README.txt` — release README template; the public CLI path is `runtime\\bin\\hermes-cli.cmd` and there is no root `Hermes-CLI.exe`.
 - `Build-Hermes-Portable.ps1` embeds the two release gates as in-script functions (merged into the build script 2026-08-10): `Test-PortablePythonContract` rejects a mismatched Python selector/runtime, hard-coded launcher directory, obsolete root CLI executable, or stale README path, and enforces the MCP import regression probe; `Test-PortableNoEditableInstall` rejects non-relocatable editable metadata (`__editable__*`, `*.egg-link`) and build-root absolute paths in `.pth` files.
 
-At assembly time (Build-Hermes-Portable.ps1), render the README metadata placeholders from the actual checkout and runtime probes, copy these templates into the staged tree, omit `Hermes-CLI.exe`, then run the two contract gates (now in-process):
+At assembly time (Build-Hermes-Portable.ps1), render the README metadata placeholders from the actual 源码 and runtime probes, copy these templates into the staged tree, omit `Hermes-CLI.exe`, then run the two contract gates (now in-process):
 
 ```powershell
 Invoke-NativeChecked 'Portable Python contract test' { Test-PortablePythonContract $Stage | Out-Host }
@@ -371,7 +371,7 @@ Do not archive unless both gates succeed.
 - Do not write mutable data under `resources` or ASAR.
 - Normal Python venvs and editable installs may embed absolute build paths.
 - Invoke bundled Python directly with `-m hermes_cli.main`; avoid relying on generated console-script shims.
-- Ensure the embedded source/update path is not treated as a mutable self-update checkout.
+- Ensure the embedded source/update path is not treated as a mutable 自我更新源码.
 - Explicitly target and validate Windows architecture because `node-pty` is native.
 - Test after moving the directory, and from space/Unicode/deep paths.
 - Verify no state appears in `%LOCALAPPDATA%\hermes`, `%APPDATA%`, or the legacy home.
@@ -409,7 +409,7 @@ git check-attr eol text -- apps/desktop/electron/main.ts   # unspecified
 2. 补丁脚本每次读取 3 个文件都**无条件 CRLF→LF**（`[IO.File]::ReadAllText(...).Replace("`r`n", "`n")`，第 63–65 行），
    所有写回都用 `WriteAllText($path, $text, [UTF8Encoding]::new($false))`（第 147/151/155/173/246/263/266/284 行）→ 写 LF。
 3. 补丁内容重复应用无害（第 180 行 "already applied" 短路），**但行尾转换不具此性质**——即使内容没变，文件也被重写成 LF。
-4. 全局 `core.autocrlf=true`（hermes-home 便携 git 的 gitconfig）下 checkout 产物是 CRLF；
+4. 全局 `core.autocrlf=true`（hermes-home 便携 git 的 gitconfig）下 检出产物是 CRLF；
    文件被改写成 LF 后 git 判定 "该 CRLF 却是 LF" → status 误报 modified，diff 归一化后为空。
 
 ### 为什么现有 `Refresh-PortableGitIndex` 没救场
@@ -418,7 +418,7 @@ git check-attr eol text -- apps/desktop/electron/main.ts   # unspecified
   当 staged 干净且 `git diff --ignore-space-at-eol` 干净时执行 `git add --renormalize .` + `git reset --mixed HEAD`。
 - **只在 `-Remove` 分支调用**（第 175 行），apply 正常路径完全不调。
 - 调用时 `Refresh-PortableGitIndex -Skip:(-not $PortableRoot)` —— 构建脚本用 `-RepoPath`（非 `-PortableRoot`）→ 必然跳过。
-- 且该函数按 "ZIP 解压后仓库"（工作区 LF）设计；对 builder 的 upstream（checkout 出 CRLF）直接跑反而会把全仓库刷成 modified。不能简单改成"每次都跑"。
+- 且该函数按 "ZIP 解压后仓库"（工作区 LF）设计；对 builder 的 upstream（检出为 CRLF）直接跑反而会把全仓库刷成 modified。不能简单改成"每次都跑"。
 
 ### 修复选项（2026-08-03 用户已拍板：方案 A 已实现）
 
@@ -431,7 +431,7 @@ git check-attr eol text -- apps/desktop/electron/main.ts   # unspecified
 - 全部 8 个 `WriteAllText` 写回点（原 147/151/155/173/246/263/266/284 行）换成 `Write-TextWithOriginalEol`。
 - 要点：PS here-string 被 PS 归一化为 LF（不随脚本文件 EOL），故插入块匹配不受影响；
   最终文本已无 `\r`，`Replace("\n","\r\n")` 不会产生 `\r\r\n`。
-- 效果：构建一轮后 3 文件与 checkout 字节级一致 → status 永远干净；不改任何 git 配置，apply/remove、upstream/打包仓库通吃。
+- 效果：构建一轮后 3 文件与源码字节级一致 → status 永远干净；不改任何 git 配置，apply/remove、upstream/打包仓库通吃。
 
 #### 方案 B（未采用）：upstream 仓库级 `core.eol=lf` + `core.autocrlf=false` + 一次性全量 `git checkout .`
 - 固定整个仓库为 LF，任何工具写 LF 都不误报。
@@ -441,7 +441,7 @@ git check-attr eol text -- apps/desktop/electron/main.ts   # unspecified
 ```powershell
 git -C $Repo restore apps/desktop/electron/main.ts apps/desktop/electron/zoom.ts apps/desktop/electron/zoom.test.ts
 ```
-- 重新 checkout 回 CRLF。治标不治本（脚本写 LF 的行为仍在），但 5 分钟改完。
+- 重新检出回 CRLF。治标不治本（脚本写 LF 的行为仍在），但 5 分钟改完。
 
 ### 实现验证（2026-08-03 实测，upstream 上真实跑 apply→remove 循环）
 
@@ -453,7 +453,7 @@ powershell -NoProfile -Command '$null = [scriptblock]::Create((Get-Content -Raw 
 git status --short        # 3 文件 modified = 真实补丁内容（预期，不是噪音）
 git diff --stat           # 只显示补丁块（main.ts +69/-2 等），无整文件行尾翻转
 python -c "import io; b=io.open(f,'rb').read(); print(b.count(b'\r\n'), b.count(b'\n')-b.count(b'\r\n'))"
-                          # 期望: CRLF=全文行数, bare LF=0 → 行尾与 checkout 一致
+                          # 期望: CRLF=全文行数, bare LF=0 → 行尾与源码一致
 
 # 3. remove 后
 git status --short        # 空 = 字节级还原 → 修复生效
@@ -705,7 +705,7 @@ curl -s http://127.0.0.1:9119/ | grep -oE '__HERMES_SESSION_TOKEN__|index-[A-Za-
 # expect: __HERMES_SESSION_TOKEN__ + the NEW bundle name (e.g. index-Cv1Lntuh.js)
 ```
 
-### Code pointers (web_server.py, source checkout)
+### Code pointers (web_server.py, 源码)
 
 - `WEB_DIST` resolution: `hermes_cli/web_server.py` (~line 135).
 - SPA bootstrap injection (`__HERMES_SESSION_TOKEN__` etc.) and the
@@ -750,7 +750,7 @@ Use this pattern when a Portable Electron/backend distribution bundles uv-manage
    - Do not query the network.
 
 2. **Explicit updater mode:**
-   - For Hermes Portable, parse the updated checkout's top-level `scripts/install.ps1` `$PythonVersion` before Python provisioning or update.
+   - For Hermes Portable, parse the 更新后源码的 top-level `scripts/install.ps1` `$PythonVersion` before Python provisioning or update.
    - Pass that selector unchanged to `uv python install/find`, validate the resolved interpreter's major/minor against it, write the resolved exact runtime directory to `current.txt`, and rebuild/smoke-test the venv before pruning the previous runtime.
    - Keep the current pointer, Python, and venv intact until candidate validation succeeds.
    - Set `UV_PYTHON_INSTALL_DIR` to the Portable runtime root and disable registry/bin integration.
@@ -1221,7 +1221,7 @@ rather than trusting `ls node_modules`.
 
 A staged/assembly tree is not guaranteed pristine build output. A user
 running the updater (`Update.exe`) against the staged tree mutates it: the
-embedded checkout advances to a NEWER official commit than the builder's
+内嵌源码 advances to a NEWER official commit than the builder's
 `upstream\`, an interrupted flow leaves the source patch applied (`git status`
 shows `M` on the patched files) and repair backups (`venv.portable-repair-old/`)
 behind, while root README/launcher timestamps still show the OLD build.
@@ -1234,7 +1234,7 @@ the build script wipes and recreates it.
 
 Upstream may ship its OWN repo-owned desktop update hand-off script
 (`scripts/desktop-update.ps1`, 429 lines, 2026-08-10) that lives IN the
-checkout so every `hermes update` refreshes the code driving the next update
+源码 so every `hermes update` refreshes the code driving the next update
 (the "frozen-binary problem": compiled updaters go stale). When reviewing or
 redesigning a custom updater, its notable patterns are:
 
@@ -1279,9 +1279,9 @@ hand-off, retry-once, and fake-success detection.
    success line present (e.g. `Portable release built: <zip>`).
 2. Output artifact exists with the expected timestamped name.
 3. No terminating-error block (`FullyQualifiedErrorId`) anywhere in the log.
-4. The embedded source checkout is clean afterward (`git status --porcelain`
+4. The 内嵌源码 is clean afterward (`git status --porcelain`
    empty, `git stash list` empty) when the script guarantees that invariant.
-5. When a stage is involved, its checkout commit matches the builder's
+5. When a stage is involved, its 源码提交 matches the builder's
    upstream HEAD and its `git status --porcelain` is empty.
 
 ---
@@ -1618,6 +1618,6 @@ Symptom: `hermes update` dies at "Fetching updates..." with
 git config --global --add safe.directory D:/path/to/repo   # per repo, once
 ```
 
-Add upstream, stage checkout, and deployed checkout paths. Harmless to apply
+Add upstream, stage 源码, and 已部署源码 paths. Harmless to apply
 proactively after a machine rebuild; the fix message git prints is the exact
 command to run.

@@ -204,7 +204,7 @@ display:
 
 - `npm install --workspace web --include=dev` + `web\` 内 `npm run build`（vite 输出到 `hermes_cli\web_dist\`）；
 - 用 staged venv 调用官方 `_write_web_ui_build_stamp` 写入 `data\hermes-home\web-ui-build-stamp.json`（web 源码内容哈希）；**必须是最后一步** —— stage 的 `git rm --cached` + `reset --hard`（行尾 LF 规范化，真正的重写发生在这一步；之前的 `reset --hard` 会被 git stat cache 跳过）会把跟踪文件从 CRLF 改写为 LF，改变哈希覆盖的字节；提前写 stamp 会导致用户首次启动时哈希不匹配而触发重建；
-- 效果：用户首次运行 `hermes dashboard` 时内容哈希一致，跳过运行时 `npm install` 与重建，离线秒开（与 TUI bundle 同一契约）。stage 的 `git clean -fdx` 排除 `hermes_cli\web_dist\`，更新脚本（`Update-Portable.ps1 -Stage SyncDesktop`）同样重建 bundle 并重写 stamp
+- 效果：用户首次运行 `hermes dashboard` 时内容哈希一致，跳过运行时 `npm install` 与重建，离线秒开（与 TUI bundle 同一契约）。stage 的 `git clean -fdx` 排除 `hermes_cli\web_dist\`，更新脚本（`Update-Portable.ps1 -Stage SyncDesktop`）同样在官方 `_web_ui_build_needed` 判定需要时重建 bundle 并重写 stamp（源码未变则跳过）
 
 ### 设计契约
 
@@ -216,6 +216,10 @@ display:
   `-Stage PatchRemove` 自清理；`Update.exe` 在官方 `hermes update` 前另有
   `-Remove` + `git clean -fd` 兜底。因此无论构建还是更新路径，内嵌源码都以干净状态收尾，
   绕过 Update.exe 直接运行官方 `hermes update` 也不会触发 "Restore local changes now? [Y/n]" stash 提示
+- 增量构建（2026-08-14）：SyncDesktop 对 Desktop/TUI/Web 分别增量判断——Desktop 用 `data\hermes-home\desktop-build-stamp.json`（构建时在**行尾规范化之后**写入的
+  `apps/desktop` + 根 package.json/lockfile 内容哈希，判断在补丁之前、以无补丁源码对比，构建机与用户侧算法一致；stamp 若在规范化前写入会因 CRLF/LF 字节差导致哈希错位、增量永远失效）；TUI/Web 直接调用官方
+  `_tui_need_rebuild` / `_web_ui_build_needed`。某部分源码没动就跳过其重建（Desktop 跳过时含补丁往返与 app 交换），
+  全部没动则整个 SyncDesktop 几乎零成本，更新明显加快
 
 ## 同步官方
 

@@ -817,6 +817,14 @@ Get-ChildItem (Join-Path $Stage 'data\hermes-home\hermes-agent\.git\objects\pack
 
 
 
+# Write the desktop build stamp AFTER the line-ending normalization
+# (git rm --cached + reset --hard above rewrites every tracked file to the
+# .gitattributes line endings): the stamp hash must match the byte state the
+# deployed SyncDesktop will see (LF, same .gitattributes), otherwise the
+# incremental check always reports stale and every update rebuilds. Same
+# class of bug as the web UI stamp (see below).
+Invoke-NativeChecked 'Desktop build stamp' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Scripts 'Update-Portable.ps1') -Stage WriteDesktopStamp -PortableRoot $Stage }
+
 # Write the web UI build stamp (content hash of web/ source) so a packaged
 # `hermes dashboard` skips the runtime npm install + rebuild on first launch
 # — same offline-first contract as the TUI bundle. MUST be the LAST step that

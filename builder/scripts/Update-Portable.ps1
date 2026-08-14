@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Patch', 'PatchRemove', 'SyncDesktop')][string]$Stage,
+    [Parameter(Mandatory = $true)][ValidateSet('Patch', 'PatchRemove', 'SyncDesktop', 'WriteDesktopStamp')][string]$Stage,
     # Patch / PatchRemove stages (RepoPath = build-time mode; PortableRoot = deployed mode)
     [string]$PortableRoot = '',
     [string]$RepoPath = '',
@@ -388,6 +388,70 @@ test('default zoom matches the Portable Appearance 100% preset', () => {
 }
 
 # =====================================================================
+# =====================================================================
+# Desktop incremental build support (2026-08-14): a source update that did
+# not touch the desktop tree skips the expensive electron-builder rebuild.
+# The content hash mirrors the official hermes_cli
+# _compute_desktop_content_hash contract: every file under apps/desktop
+# (git ls-files honours .gitignore, so node_modules/dist/release are
+# excluded exactly like the official pathspec walk) plus the root
+# package.json / package-lock.json (workspace dependency resolution).
+# Build machine and deployed side both call these helpers, so the hash
+# comparison is always apples-to-apples.
+# =====================================================================
+function Get-DesktopContentHash([string]$RepoDir) {
+    $git = Join-Path (Split-Path $RepoDir -Parent) 'git\cmd\git.exe'
+    if (-not (Test-Path $git)) { $git = 'git.exe' }
+    # git ls-files honours .gitignore (node_modules/dist/release excluded
+    # exactly like the official pathspec walk); --others --exclude-standard
+    # adds untracked-but-not-ignored files so a stray source file changes the
+    # hash just like the official directory walk would.
+    $files = @(& $git -C $RepoDir ls-files -- apps/desktop 2>$null) +
+             @(& $git -C $RepoDir ls-files --others --exclude-standard -- apps/desktop 2>$null) +
+             @('package.json', 'package-lock.json')
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $sep = [byte[]](0)
+    foreach ($rel in $files) {
+        if (-not $rel) { continue }
+        $bytes = [Text.Encoding]::UTF8.GetBytes($rel)
+        $sha.TransformBlock($bytes, 0, $bytes.Length, $null, 0) | Out-Null
+        $sha.TransformBlock($sep, 0, 1, $null, 0) | Out-Null
+        $path = Join-Path $RepoDir ($rel -replace '/', '\')
+        if (Test-Path $path) {
+            $content = [IO.File]::ReadAllBytes($path)
+            $sha.TransformBlock($content, 0, $content.Length, $null, 0) | Out-Null
+        }
+        $sha.TransformBlock($sep, 0, 1, $null, 0) | Out-Null
+    }
+    $sha.TransformFinalBlock([byte[]]@(), 0, 0) | Out-Null
+    $hash = ''
+    foreach ($b in $sha.Hash) { $hash += $b.ToString('x2') }
+    return $hash
+}
+
+function Test-DesktopBuildStale([string]$RepoDir, [string]$HomeDir) {
+    $stampFile = Join-Path $HomeDir 'desktop-build-stamp.json'
+    if (-not (Test-Path $stampFile)) { return $true }
+    try {
+        $stamp = Get-Content $stampFile -Raw | ConvertFrom-Json
+    } catch { return $true }
+    if (-not $stamp.contentHash) { return $true }
+    return ((Get-DesktopContentHash $RepoDir) -ne $stamp.contentHash)
+}
+
+function Write-DesktopBuildStamp([string]$RepoDir, [string]$HomeDir) {
+    try {
+        $stamp = @{
+            contentHash = Get-DesktopContentHash $RepoDir
+            sourceMode  = $true
+            builtAt     = (Get-Date).ToUniversalTime().ToString('o')
+        } | ConvertTo-Json
+        Set-Content -Path (Join-Path $HomeDir 'desktop-build-stamp.json') -Value $stamp -Encoding UTF8
+    } catch {
+        Write-Warning "Failed to write desktop build stamp: $($_.Exception.Message)"
+    }
+}
+
 # Stage: SyncDesktop — 重建 Desktop/TUI/Web 并原子交换 app
 # =====================================================================
 function Sync-PortableDesktop {
@@ -399,14 +463,24 @@ function Sync-PortableDesktop {
 
     Stop-RootProcesses
 
+    $needDesktopBuild = $true
     if (-not $SkipBuild) {
         if (-not (Test-Path $Python)) { throw 'Portable venv is missing. Run scripts\Repair-Portable.ps1 first.' }
         $PatchScript = Join-Path $ToolsDir 'Update-Portable.ps1'
-        Invoke-NativeChecked 'Applying the Portable Desktop source patch' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PatchScript -Stage Patch -PortableRoot $Root }
-        Set-PortableEnvironment
+        # Skip the expensive electron-builder rebuild when the source update
+        # did not touch the desktop tree (content-hash stamp, see helpers
+        # above; the stamp is written after a successful build + PatchRemove,
+        # so the comparison always runs against pristine upstream source).
+        $needDesktopBuild = Test-DesktopBuildStale $Repo $HermesHome
+        if ($needDesktopBuild) {
+            Invoke-NativeChecked 'Applying the Portable Desktop source patch' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PatchScript -Stage Patch -PortableRoot $Root }
+            Set-PortableEnvironment
 
-        Write-Host 'Building the latest official Hermes Desktop...'
-        Invoke-NativeChecked 'Desktop build' { & $Python -m hermes_cli.main desktop --build-only --force-build }
+            Write-Host 'Building the latest official Hermes Desktop...'
+            Invoke-NativeChecked 'Desktop build' { & $Python -m hermes_cli.main desktop --build-only --force-build }
+        } else {
+            Write-Host 'Desktop source unchanged since the last build; skipping electron-builder rebuild.'
+        }
         # npm version follows the official floor (repo package.json engines.npm);
         # the node distribution's bundled npm does not track it. Parse the highest
         # ">=" constraint and upgrade when the packaged npm is below that floor.
@@ -452,31 +526,43 @@ function Sync-PortableDesktop {
         # failure, drop any stale bundle so the TUI falls back to a first-launch
         # install from the current source instead of running an old bundle.
         $tuiDistDir = Join-Path $Repo 'hermes_cli\tui_dist'
+        # Align with the official updater: rebuild the TUI bundle only when
+        # _tui_need_rebuild says so (dist/entry.js missing or older than its
+        # inputs). On any error, rebuild (conservative).
+        $tuiNeeded = $true
         try {
-            Push-Location $Repo
+            $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
+            $tuiNeeded = ((& $Python -c "from pathlib import Path; from hermes_cli.main import _tui_need_rebuild; print(_tui_need_rebuild(Path(r'$Repo\ui-tui')))" 2>$null | Select-Object -Last 1) -eq 'True')
+        } catch { $tuiNeeded = $true }
+        if ($tuiNeeded) {
             try {
-                Invoke-NativeChecked 'TUI workspace install' { & npm.cmd install --workspace ui-tui --include=dev --silent --no-fund --no-audit --progress=false }
-                Push-Location (Join-Path $Repo 'ui-tui')
+                Push-Location $Repo
                 try {
-                    Invoke-NativeChecked 'TUI bundle build' { & npm.cmd run build }
+                    Invoke-NativeChecked 'TUI workspace install' { & npm.cmd install --workspace ui-tui --include=dev --silent --no-fund --no-audit --progress=false }
+                    Push-Location (Join-Path $Repo 'ui-tui')
+                    try {
+                        Invoke-NativeChecked 'TUI bundle build' { & npm.cmd run build }
+                    } finally {
+                        Pop-Location
+                    }
                 } finally {
                     Pop-Location
                 }
-            } finally {
-                Pop-Location
+                New-Item -ItemType Directory -Force $tuiDistDir | Out-Null
+                Copy-Item (Join-Path $Repo 'ui-tui\dist\entry.js') (Join-Path $tuiDistDir 'entry.js') -Force
+                # npm install --workspace ui-tui can "complete" the committed lockfile
+                # (npm >=10 re-resolves scoped peer deps and adds entries). Restore it
+                # so the embedded checkout stays clean for the next update gate.
+                if (Test-Path (Join-Path $Repo '.git')) {
+                    & git.exe -C $Repo checkout -- package-lock.json 2>$null | Out-Null
+                }
+                Write-Host "Prebuilt TUI bundle: $tuiDistDir\entry.js"
+            } catch {
+                Remove-TreeBestEffort $tuiDistDir
+                Write-Warning "TUI bundle build failed ($($_.Exception.Message)); removed stale bundle — first TUI launch will npm install from source."
             }
-            New-Item -ItemType Directory -Force $tuiDistDir | Out-Null
-            Copy-Item (Join-Path $Repo 'ui-tui\dist\entry.js') (Join-Path $tuiDistDir 'entry.js') -Force
-            # npm install --workspace ui-tui can "complete" the committed lockfile
-            # (npm >=10 re-resolves scoped peer deps and adds entries). Restore it
-            # so the embedded checkout stays clean for the next update gate.
-            if (Test-Path (Join-Path $Repo '.git')) {
-                & git.exe -C $Repo checkout -- package-lock.json 2>$null | Out-Null
-            }
-            Write-Host "Prebuilt TUI bundle: $tuiDistDir\entry.js"
-        } catch {
-            Remove-TreeBestEffort $tuiDistDir
-            Write-Warning "TUI bundle build failed ($($_.Exception.Message)); removed stale bundle — first TUI launch will npm install from source."
+        } else {
+            Write-Host 'TUI bundle is fresh; skipping TUI rebuild.'
         }
     }
 
@@ -486,72 +572,93 @@ function Sync-PortableDesktop {
     # failure, drop any stale bundle so the dashboard fails explicitly
     # ("Frontend not built") instead of serving a mismatched old UI.
     $webDistDir = Join-Path $Repo 'hermes_cli\web_dist'
+    # Align with the official updater: rebuild the web bundle only when
+    # _web_ui_build_needed says so (content-hash stamp). On any error,
+    # rebuild (conservative).
+    $webNeeded = $true
     try {
-        Push-Location $Repo
+        $env:HERMES_HOME = $HermesHome
+        $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
+        $webNeeded = ((& $Python -c "from pathlib import Path; from hermes_cli.main import _web_ui_build_needed; print(_web_ui_build_needed(Path(r'$Repo\web')))" 2>$null | Select-Object -Last 1) -eq 'True')
+    } catch { $webNeeded = $true }
+    if ($webNeeded) {
         try {
-            Invoke-NativeChecked 'Web workspace install' { & npm.cmd install --workspace web --include=dev --silent --no-fund --no-audit --progress=false }
-            Push-Location (Join-Path $Repo 'web')
+            Push-Location $Repo
             try {
-                Invoke-NativeChecked 'Web bundle build' { & npm.cmd run build }
+                Invoke-NativeChecked 'Web workspace install' { & npm.cmd install --workspace web --include=dev --silent --no-fund --no-audit --progress=false }
+                Push-Location (Join-Path $Repo 'web')
+                try {
+                    Invoke-NativeChecked 'Web bundle build' { & npm.cmd run build }
+                } finally {
+                    Pop-Location
+                }
             } finally {
                 Pop-Location
             }
-        } finally {
-            Pop-Location
-        }
-        # npm install --workspace web can "complete" the committed root lockfile
-        # (npm >=10 re-resolves scoped peer deps). Restore it so the embedded
-        # checkout stays clean for the next update gate.
-        if (Test-Path (Join-Path $Repo '.git')) {
-            & git.exe -C $Repo checkout -- package-lock.json 2>$null | Out-Null
-        }
-        Write-Host "Prebuilt Web bundle: $webDistDir\index.html"
-        # Write the web UI build stamp so the next dashboard launch skips the
-        # runtime npm install + rebuild (offline-first contract, same as TUI).
-        # Non-fatal: a missing stamp only costs one rebuild, while deleting the
-        # good bundle below would break the dashboard outright.
-        try {
-            $env:HERMES_HOME = $HermesHome
-            $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
-            Invoke-NativeChecked 'Web UI build stamp' { & $Python -c "from pathlib import Path; from hermes_cli.main import _write_web_ui_build_stamp; _write_web_ui_build_stamp(Path(r'$Repo'), Path(r'$Repo\web'))" }
+            # npm install --workspace web can "complete" the committed root lockfile
+            # (npm >=10 re-resolves scoped peer deps). Restore it so the embedded
+            # checkout stays clean for the next update gate.
+            if (Test-Path (Join-Path $Repo '.git')) {
+                & git.exe -C $Repo checkout -- package-lock.json 2>$null | Out-Null
+            }
+            Write-Host "Prebuilt Web bundle: $webDistDir\index.html"
+            # Write the web UI build stamp so the next dashboard launch skips the
+            # runtime npm install + rebuild (offline-first contract, same as TUI).
+            # Non-fatal: a missing stamp only costs one rebuild, while deleting the
+            # good bundle below would break the dashboard outright.
+            try {
+                $env:HERMES_HOME = $HermesHome
+                $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
+                Invoke-NativeChecked 'Web UI build stamp' { & $Python -c "from pathlib import Path; from hermes_cli.main import _write_web_ui_build_stamp; _write_web_ui_build_stamp(Path(r'$Repo'), Path(r'$Repo\web'))" }
+            } catch {
+                Write-Warning "Web UI build stamp failed ($($_.Exception.Message)); first dashboard launch after update will rebuild the frontend once."
+            }
         } catch {
-            Write-Warning "Web UI build stamp failed ($($_.Exception.Message)); first dashboard launch after update will rebuild the frontend once."
+            Remove-TreeBestEffort $webDistDir
+            Write-Warning "Web bundle build failed ($($_.Exception.Message)); removed stale bundle — dashboard will report 'Frontend not built' until the next full build."
         }
-    } catch {
-        Remove-TreeBestEffort $webDistDir
-        Write-Warning "Web bundle build failed ($($_.Exception.Message)); removed stale bundle — dashboard will report 'Frontend not built' until the next full build."
+    } else {
+        Write-Host 'Web UI bundle is fresh; skipping web rebuild.'
     }
 
-    $BuiltExe = Join-Path $BuiltApp 'Hermes.exe'
-    if (-not (Test-Path $BuiltExe)) { throw "Built Desktop was not found: $BuiltExe" }
-    if ((Get-Item $BuiltExe).Length -lt 50MB) { throw 'Built Hermes.exe is unexpectedly small.' }
+    if ($needDesktopBuild) {
+        $BuiltExe = Join-Path $BuiltApp 'Hermes.exe'
+        if (-not (Test-Path $BuiltExe)) { throw "Built Desktop was not found: $BuiltExe" }
+        if ((Get-Item $BuiltExe).Length -lt 50MB) { throw 'Built Hermes.exe is unexpectedly small.' }
 
-    Remove-TreeBestEffort $NextApp
-    New-Item -ItemType Directory -Force $NextApp | Out-Null
-    robocopy $BuiltApp $NextApp /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "Copying Desktop build failed with robocopy exit code $LASTEXITCODE" }
-    New-Item -ItemType File -Force (Join-Path $NextApp 'portable.marker') | Out-Null
-    if (-not (Test-Path (Join-Path $NextApp 'Hermes.exe'))) { throw 'Staged Portable Desktop is incomplete.' }
+        Remove-TreeBestEffort $NextApp
+        New-Item -ItemType Directory -Force $NextApp | Out-Null
+        robocopy $BuiltApp $NextApp /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "Copying Desktop build failed with robocopy exit code $LASTEXITCODE" }
+        New-Item -ItemType File -Force (Join-Path $NextApp 'portable.marker') | Out-Null
+        if (-not (Test-Path (Join-Path $NextApp 'Hermes.exe'))) { throw 'Staged Portable Desktop is incomplete.' }
 
-    Remove-TreeBestEffort $OldApp
-    if (Test-Path $LiveApp) { Rename-Item $LiveApp (Split-Path $OldApp -Leaf) }
-    try {
-        Rename-Item $NextApp (Split-Path $LiveApp -Leaf)
         Remove-TreeBestEffort $OldApp
-    } catch {
-        Remove-TreeBestEffort $LiveApp
-        if (Test-Path $OldApp) { Rename-Item $OldApp 'app' }
-        throw
+        if (Test-Path $LiveApp) { Rename-Item $LiveApp (Split-Path $OldApp -Leaf) }
+        try {
+            Rename-Item $NextApp (Split-Path $LiveApp -Leaf)
+            Remove-TreeBestEffort $OldApp
+        } catch {
+            Remove-TreeBestEffort $LiveApp
+            if (Test-Path $OldApp) { Rename-Item $OldApp 'app' }
+            throw
+        }
+
+        Write-Host "Portable Desktop synchronized: $LiveApp"
+
+        # The live app owns the compiled patch, so restore the embedded checkout to a
+        # pristine state: a direct `hermes update` (outside Update.exe) then never hits
+        # the "Restore local changes now? [Y/n]" stash prompt. Idempotent — a no-op
+        # when the patch is already absent (e.g. under -SkipBuild). Update.exe's own
+        # pre-update -Remove stays as a safety net for patches from other sources.
+        Invoke-NativeChecked 'Removing the Portable Desktop source patch' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ToolsDir 'Update-Portable.ps1') -Stage PatchRemove -PortableRoot $Root }
+
+        # Record the pristine (patch-free) source state so the next update can
+        # skip the rebuild when the desktop tree did not change.
+        Write-DesktopBuildStamp $Repo $HermesHome
+    } else {
+        Write-Host "Desktop app unchanged; keeping current app (desktop-build-stamp matches)."
     }
-
-    Write-Host "Portable Desktop synchronized: $LiveApp"
-
-    # The live app owns the compiled patch, so restore the embedded checkout to a
-    # pristine state: a direct `hermes update` (outside Update.exe) then never hits
-    # the "Restore local changes now? [Y/n]" stash prompt. Idempotent — a no-op
-    # when the patch is already absent (e.g. under -SkipBuild). Update.exe's own
-    # pre-update -Remove stays as a safety net for patches from other sources.
-    Invoke-NativeChecked 'Removing the Portable Desktop source patch' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ToolsDir 'Update-Portable.ps1') -Stage PatchRemove -PortableRoot $Root }
 
     # The live app now owns the build output. Remove source-tree build caches so
     # the next official update does not rebuild Desktop once before this script,
@@ -566,4 +673,12 @@ switch ($Stage) {
     'Patch'       { Apply-PortablePatch }
     'PatchRemove' { Apply-PortablePatch -Remove }
     'SyncDesktop' { Sync-PortableDesktop }
+    'WriteDesktopStamp' {
+        # Build-machine stage: record the pristine desktop source hash of the
+        # staged hermes-agent so deployed updates can skip the electron-builder
+        # rebuild when the desktop tree did not change.
+        $stampRoot = if ($PortableRoot) { $PortableRoot } else { $Root }
+        $stampRepo = if ($RepoPath) { $RepoPath } else { Join-Path $stampRoot 'data\hermes-home\hermes-agent' }
+        Write-DesktopBuildStamp $stampRepo (Join-Path $stampRoot 'data\hermes-home')
+    }
 }

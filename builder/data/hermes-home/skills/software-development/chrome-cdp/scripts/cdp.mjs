@@ -71,7 +71,7 @@ function getWsUrl() {
       resolve(home, '.var/app', appId, 'config', name, 'Default/DevToolsActivePort'),
     ]),
     // Windows: %LOCALAPPDATA%/<name>/User Data/DevToolsActivePort
-    ...(IS_WINDOWS ? ['Google/Chrome', 'BraveSoftware/Brave-Browser', 'Microsoft/Edge'].flatMap(b => {
+    ...(IS_WINDOWS ? ['Google/Chrome', 'BraveSoftware/Brave-Browser', 'Microsoft/Edge', '360ChromeX/Chrome'].flatMap(b => {
       const base = process.env.LOCALAPPDATA || resolve(home, 'AppData/Local');
       return [
         resolve(base, b, 'User Data/DevToolsActivePort'),

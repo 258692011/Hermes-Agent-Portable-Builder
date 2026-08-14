@@ -426,6 +426,17 @@ function Sync-PortableDesktop {
                     if ($cur -lt $best) {
                         Write-Host "Upgrading packaged npm to match official requirement ($npmReq, floor >=$best)..."
                         Invoke-NativeChecked "Packaged npm upgrade to npm@$($best.Major)" { & $npmCmd install --prefix (Split-Path $npmCmd -Parent) "npm@$($best.Major)" --no-fund --no-audit --progress=false }
+                        # npm install --prefix prunes the official zip's bundled
+                        # corepack from node_modules (verified 2026-08-14: it
+                        # disappears after the upgrade, leaving dead corepack
+                        # shims that fail with MODULE_NOT_FOUND). Reinstall the
+                        # bundled version (0.34.6 for node-v22.23.2) so corepack
+                        # survives build and update.
+                        $corepackJs = Join-Path (Split-Path $npmCmd -Parent) 'node_modules\corepack\dist\corepack.js'
+                        if (-not (Test-Path $corepackJs)) {
+                            Write-Host "Packaged corepack was pruned by the npm upgrade; reinstalling corepack@0.34.6..."
+                            Invoke-NativeChecked "Packaged corepack reinstall" { & $npmCmd install --prefix (Split-Path $npmCmd -Parent) 'corepack@0.34.6' --no-fund --no-audit --progress=false }
+                        }
                         Write-Host "Packaged npm now $((& $npmCmd --version 2>$null).Trim()) (official requires $npmReq)."
                     }
                 }

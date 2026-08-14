@@ -420,6 +420,15 @@ function Ensure-OfficialNpm([string]$NodeDir) {
     $targetMajor = $best.Major
     Write-Host "Official npm requirement ($npmReq, floor >=$best) exceeds packaged npm ($current); upgrading packaged npm to npm@$targetMajor..."
     Invoke-NativeChecked "Packaged npm upgrade to npm@$targetMajor" { & $npmCmd install --prefix $NodeDir "npm@$targetMajor" --no-fund --no-audit --progress=false }
+    # npm install --prefix prunes the official zip's bundled corepack from
+    # node_modules (verified 2026-08-14: it disappears after the npm upgrade
+    # above, leaving dead corepack shims that fail with MODULE_NOT_FOUND).
+    # Reinstall the version bundled with the official Node zip (0.34.6 for
+    # node-v22.23.2; bump alongside the Node archive) so corepack survives.
+    if (-not (Test-Path (Join-Path $NodeDir 'node_modules\corepack\dist\corepack.js'))) {
+        Write-Host "Packaged corepack was pruned by the npm upgrade; reinstalling corepack@0.34.6..."
+        Invoke-NativeChecked "Packaged corepack reinstall" { & $npmCmd install --prefix $NodeDir 'corepack@0.34.6' --no-fund --no-audit --progress=false }
+    }
     $after = (& $npmCmd --version 2>$null).Trim()
     Write-Host "Packaged npm now $after (official requires $npmReq)."
 }

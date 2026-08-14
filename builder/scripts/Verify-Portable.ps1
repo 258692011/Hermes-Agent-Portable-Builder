@@ -22,6 +22,12 @@ $Checks = [ordered]@{
   Python = Join-Path $Root "runtime\python\$PythonRuntimeName\python.exe"
   Node = Join-Path $HomeDir 'node\node.exe'
   Npm = Join-Path $HomeDir 'node\npm.cmd'
+  # corepack body + shim: the official Node zip bundles corepack, but the
+  # Ensure-OfficialNpm npm upgrade (Build-Hermes-Portable.ps1) prunes
+  # node_modules\corepack, leaving dead shims (verified 2026-08-14). Gate on
+  # the body file so a pruned corepack fails the build.
+  Corepack = Join-Path $HomeDir 'node\node_modules\corepack\dist\corepack.js'
+  CorepackShim = Join-Path $HomeDir 'node\corepack.cmd'
   Git = Join-Path $HomeDir 'git\cmd\git.exe'
   Bash = Join-Path $HomeDir 'git\bin\bash.exe'
   Uv = Join-Path $Root 'runtime\bin\uv.exe'
@@ -99,6 +105,7 @@ $results.Hermes = Invoke-Check $Checks.Hermes @('--version')
 $results.Python = (& $Checks.Python --version 2>&1 | Out-String).Trim()
 $results.Node = (& $Checks.Node --version 2>&1 | Out-String).Trim()
 $results.Npm = (& $Checks.Npm --version 2>&1 | Out-String).Trim()
+$results.Corepack = (& $Checks.CorepackShim --version 2>&1 | Out-String).Trim()
 $results.Git = (& $Checks.Git --version 2>&1 | Out-String).Trim()
 $results.Bash = ((& $Checks.Bash --version 2>&1) | Select-Object -First 1 | Out-String).Trim()
 $results.Uv = (& $Checks.Uv --version 2>&1 | Out-String).Trim()

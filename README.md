@@ -18,7 +18,7 @@
 |---|---|---:|---|
 | Windows PowerShell | 5.1（Windows 自带） | 是 | 构建入口及维护脚本运行环境 |
 | Git for Windows | 当前固定 **2.55.0.3**（`v2.55.0.windows.3`，构建脚本硬编码） | 否 | 构建器**不读取系统**；从 `builder\assets\git\` 缓存取 PortableGit 进成品，缓存缺失才下载（下载后回填 assets 缓存） |
-| Node.js + npm | 上游选择器 **22**；当前缓存 **v22.23.2**（npm 11.19.0） | 是（编译用） | 编译 Desktop、TUI 和运行 electron-builder 需要构建机上的 npm；打包进成品的 Node 运行时**不读取系统**，从 `builder\assets\node\` 缓存取，缺失才从 nodejs.org 下载；成品 Node 同时含官方捆绑的 corepack（当前 0.34.6）（下载后回填 assets 缓存） |
+| Node.js + npm | 上游选择器 **22**；当前缓存 **v22.23.2**（npm 11.19.0） | 是（编译用） | 编译 Desktop、TUI 和运行 electron-builder 需要构建机上的 npm；打包进成品的 Node 运行时**不读取系统**，从 `builder\assets\node\` 缓存取，缺失才从 nodejs.org 下载；成品 Node 同时含官方捆绑的 corepack（版本随官方 Node zip 自动跟随）（下载后回填 assets 缓存） |
 | uv | 构建器用固定 **0.12.3** | 否 | 构建器**不读取系统**；从 `builder\assets\uv\` 缓存取，缺失才下载（下载后回填 assets 缓存） |
 | Python | 当前上游选择器为 **3.11**；patch 版本不锁定 | 否 | 构建器**不读取系统**；从 `builder\assets\python\` 的解压目录取，缺失才由 uv 安装（下载后回填 assets 缓存） |
 | .NET Framework C# 编译器 | v4.0（Windows 10/11 自带） | 是（系统组件） | 使用 `Framework64\v4.0.30319\csc.exe` 编译 `Hermes.exe` 和 `Update.exe` |
@@ -27,9 +27,9 @@
 版本规则：Git 固定 2.55.0.3（构建脚本硬编码，升级需改 `$gitTag`/`$gitVer`）；Node 跟随上游选择器主版本 22，
 缓存里的具体 patch 版本随上游 `NodeVersion` 更新而变；uv 固定 0.12.3；Python 跟随上游选择器 3.11。上游以后修改 `PythonVersion`、`NodeVersion` 或
 `package.json` 的 `engines.npm` 时，构建器会读取新要求并自动适配（包内 npm 不足时自动升级；
-npm 升级命令会清掉官方捆绑的 corepack，因此升级后脚本自动补装回 corepack@0.34.6，与官方 Node zip 捆绑版本一致），
+npm 升级命令会清掉官方捆绑的 corepack，因此脚本在升级前读取官方捆绑的 corepack 版本、升级后按该版本重装（版本始终跟随 Node zip，无硬编码）），
 此表也应随发布流程同步更新。用户端更新脚本（`Update-Portable.ps1 -Stage SyncDesktop`）同样会在 TUI 重建前
-检查并升级包内 npm（升级后同样补装 corepack），因此官方提升 npm 要求不会卡住老部署的更新。
+检查并升级包内 npm（同样先读版本后重装 corepack），因此官方提升 npm 要求不会卡住老部署的更新。
 `Verify-Portable.ps1` 对成品 Node 的 corepack 本体与 shim 设有存在性门禁，构建后自动检查，缺失即构建失败
 
 ```powershell

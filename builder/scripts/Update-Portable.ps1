@@ -425,17 +425,21 @@ function Sync-PortableDesktop {
                     $cur = [version]((& $npmCmd --version 2>$null).Trim())
                     if ($cur -lt $best) {
                         Write-Host "Upgrading packaged npm to match official requirement ($npmReq, floor >=$best)..."
-                        Invoke-NativeChecked "Packaged npm upgrade to npm@$($best.Major)" { & $npmCmd install --prefix (Split-Path $npmCmd -Parent) "npm@$($best.Major)" --no-fund --no-audit --progress=false }
-                        # npm install --prefix prunes the official zip's bundled
-                        # corepack from node_modules (verified 2026-08-14: it
-                        # disappears after the upgrade, leaving dead corepack
-                        # shims that fail with MODULE_NOT_FOUND). Reinstall the
-                        # bundled version (0.34.6 for node-v22.23.2) so corepack
-                        # survives build and update.
-                        $corepackJs = Join-Path (Split-Path $npmCmd -Parent) 'node_modules\corepack\dist\corepack.js'
-                        if (-not (Test-Path $corepackJs)) {
-                            Write-Host "Packaged corepack was pruned by the npm upgrade; reinstalling corepack@0.34.6..."
-                            Invoke-NativeChecked "Packaged corepack reinstall" { & $npmCmd install --prefix (Split-Path $npmCmd -Parent) 'corepack@0.34.6' --no-fund --no-audit --progress=false }
+                        # Read the bundled corepack version BEFORE the upgrade:
+                        # the npm install --prefix below prunes
+                        # node_modules\corepack (verified 2026-08-14, leaving
+                        # dead shims that fail with MODULE_NOT_FOUND), so
+                        # afterwards reinstall exactly the version the official
+                        # Node zip bundled — the version follows the Node
+                        # archive automatically, no hardcoding.
+                        $nodeDir = Split-Path $npmCmd -Parent
+                        $corepackVersion = $null
+                        $cpPkg = Join-Path $nodeDir 'node_modules\corepack\package.json'
+                        if (Test-Path $cpPkg) { try { $corepackVersion = (Get-Content $cpPkg -Raw | ConvertFrom-Json).version } catch { } }
+                        Invoke-NativeChecked "Packaged npm upgrade to npm@$($best.Major)" { & $npmCmd install --prefix $nodeDir "npm@$($best.Major)" --no-fund --no-audit --progress=false }
+                        if ($corepackVersion -and -not (Test-Path (Join-Path $nodeDir 'node_modules\corepack\dist\corepack.js'))) {
+                            Write-Host "Packaged corepack was pruned by the npm upgrade; reinstalling corepack@$corepackVersion (bundled version)..."
+                            Invoke-NativeChecked "Packaged corepack reinstall" { & $npmCmd install --prefix $nodeDir "corepack@$corepackVersion" --no-fund --no-audit --progress=false }
                         }
                         Write-Host "Packaged npm now $((& $npmCmd --version 2>$null).Trim()) (official requires $npmReq)."
                     }

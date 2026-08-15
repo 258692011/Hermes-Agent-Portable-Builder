@@ -214,7 +214,9 @@ display:
 - 上述修改只存在于构建窗口期；发布 ZIP 内嵌的官方源码保持官方原样
 - 更新流程同样不留补丁：`Update-Portable.ps1 -Stage SyncDesktop` 在桌面同步（原子交换）完成后自动执行
   `-Stage PatchRemove` 自清理；`Update.exe` 在官方 `hermes update` 前另有
-  `-Remove` + `git clean -fd` 兜底。因此无论构建还是更新路径，内嵌源码都以干净状态收尾，
+  `-Remove` + `git clean -fd` 兜底，并在官方 `hermes update` 前与 `-UpdatePython` 前各执行一次
+  `StopPortableProcesses`（按安装根路径停 Hermes/python，释放 cryptography DLL 锁与 venv 目录锁，
+  2026-08-15 修复）。因此无论构建还是更新路径，内嵌源码都以干净状态收尾，
   绕过 Update.exe 直接运行官方 `hermes update` 也不会触发 "Restore local changes now? [Y/n]" stash 提示
 - 增量构建（2026-08-14）：SyncDesktop 对 Desktop/TUI/Web 分别增量判断——Desktop 用 `data\hermes-home\desktop-build-stamp.json`（构建时在**行尾规范化之后**写入的
   `apps/desktop` + 根 package.json/lockfile 内容哈希，判断在补丁之前、以无补丁源码对比，构建机与用户侧算法一致；stamp 若在规范化前写入会因 CRLF/LF 字节差导致哈希错位、增量永远失效）；TUI/Web 直接调用官方

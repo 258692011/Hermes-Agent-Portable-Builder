@@ -133,30 +133,63 @@ internal static class Program
             string foreign = FindForeignDashboardPids(root);
             if (foreign.Length > 0)
                 Environment.SetEnvironmentVariable("HERMES_DESKTOP_CHILD_PID", foreign);
+            // Stop every Hermes/python process under this install BEFORE the
+            // official update: the Python dependency install rewrites
+            // cryptography's native DLLs (_rust.pyd etc.), and Windows refuses
+            // to replace a DLL that a running Hermes/python process has loaded
+            // (verified 2026-08-15: os error 5 on _rust.pyd — the desktop
+            // backend python.exe loads it, so any update while the app is
+            // running fails the dependency step). The update relaunches the
+            // app afterwards anyway, so nothing is lost. Best-effort: if the
+            // stop fails the update still runs and may hit the lock again.
+            StopPortableProcesses(root);
             rc = RunCaptured(cli, "-m hermes_cli.main update", root, out output);
-            if (rc != 0 && rc != 2)
-            {
-                // Learned from official desktop-update.ps1: exit != 0 && != 2
-                // (2 = "close all Hermes windows", not retryable) may be the
-                // update-boundary class — fresh code on disk, stale code in
-                // memory. Retry once; the freshly pulled code loads on the
-                // second run.
-                Console.WriteLine("首次 hermes update 失败（退出码 " + rc + "），重试一次...");
-                AppendDiag(diagLog, "官方更新 (hermes update) 首次尝试", rc, output);
-                rc = RunCaptured(cli, "-m hermes_cli.main update", root, out output);
-            }
             if (rc != 0)
             {
                 AppendDiag(diagLog, "官方更新 (hermes update)", rc, output);
-                MessageBox.Show(
-                    "更新失败：无法完成官方 Hermes 更新（退出码 " + rc + "）。\n\n" +
-                    ClassifyUpdateError(output) +
-                    "\n\n详细日志：" + diagLog,
-                    "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return Finish(rc, "hermes update failed with exit code " + rc);
+                // The official update's dependency install can fail because the
+                // update process ITSELF (python) has loaded cryptography and
+                // other binary deps — uv cannot rename a DLL mapped by its own
+                // parent process (os error 5, verified 2026-08-14 on the
+                // cryptography 48→50 upgrade; a running Hermes desktop is NOT
+                // required for this). The update process has exited by now, so
+                // a STANDALONE uv install (Rust process, never loads
+                // cryptography) can finish the deps. Best-effort: if it
+                // succeeds, continue the update; otherwise fall through to the
+                // failure dialog.
+                string uvBin = Path.Combine(root, "data", "hermes-home", "bin", "uv.exe");
+                string repoDir = Path.Combine(root, "data", "hermes-home", "hermes-agent");
+                string venvPython = Path.Combine(repoDir, "venv", "Scripts", "python.exe");
+                if (File.Exists(uvBin) && File.Exists(venvPython))
+                {
+                    Console.WriteLine("官方更新失败（依赖安装），尝试用独立 uv 完成依赖安装...");
+                    int uvRc = RunCaptured(uvBin, "pip install --python \"" + venvPython + "\" -e .", repoDir, out output);
+                    if (uvRc == 0)
+                    {
+                        Console.WriteLine("✓ 独立 uv 依赖安装完成。");
+                        rc = 0;
+                    }
+                    else
+                    {
+                        AppendDiag(diagLog, "独立 uv 依赖安装", uvRc, output);
+                    }
+                }
+                if (rc != 0)
+                {
+                    MessageBox.Show(
+                        "更新失败：无法完成官方 Hermes 更新（退出码 " + rc + "）。\n\n" +
+                        ClassifyUpdateError(output) +
+                        "\n\n详细日志：" + diagLog,
+                        "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return Finish(rc, "hermes update failed with exit code " + rc);
+                }
             }
             // PythonVersion is read only after the official source update, so a
             // newly changed upstream selector controls provisioning and cutover.
+            // Stop processes again: the official update may have left its own
+            // python children behind, and the venv repair below renames the
+            // venv directory — a stray child holding it would fail that step.
+            StopPortableProcesses(root);
             rc = RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(repair) + " -UpdatePython -KeepProcesses", root, out output);
             if (rc != 0) return Fail("更新 Python 运行时", rc, "按官方选择器更新 Python 失败，现有版本不受影响。", output, diagLog);
             rc = RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(updater) + " -Stage SyncDesktop", root, out output);
@@ -380,6 +413,24 @@ internal static class Program
             output = sb.ToString();
             return p.ExitCode;
         }
+    }
+
+    private static void StopPortableProcesses(string root)
+    {
+        // Kill only Hermes/python processes whose image lives under this
+        // install root; never touch unrelated python.exe processes elsewhere.
+        // Powershell's -like wildcard treats backslashes as literals, so the
+        // root path is used as-is. Must stay .NET 4.0 csc-safe.
+        try
+        {
+            string safeRoot = root.Replace("'", "''");
+            string ps = "Get-Process Hermes,python -ErrorAction SilentlyContinue | " +
+                        "Where-Object { $_.Path -like '" + safeRoot + "*' } | " +
+                        "Stop-Process -Force";
+            string ignored;
+            RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"" + ps + "\"", root, out ignored);
+        }
+        catch { }
     }
 
     private static string FindForeignDashboardPids(string root)

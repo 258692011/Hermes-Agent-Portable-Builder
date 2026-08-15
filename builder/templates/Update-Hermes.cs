@@ -147,16 +147,18 @@ internal static class Program
             if (rc != 0)
             {
                 AppendDiag(diagLog, "官方更新 (hermes update)", rc, output);
-                // The official update's dependency install can fail because the
-                // update process ITSELF (python) has loaded cryptography and
-                // other binary deps — uv cannot rename a DLL mapped by its own
-                // parent process (os error 5, verified 2026-08-14 on the
-                // cryptography 48→50 upgrade; a running Hermes desktop is NOT
-                // required for this). The update process has exited by now, so
-                // a STANDALONE uv install (Rust process, never loads
-                // cryptography) can finish the deps. Best-effort: if it
-                // succeeds, continue the update; otherwise fall through to the
-                // failure dialog.
+                // The official update's dependency install can fail because
+                // cryptography's native DLLs (_rust.pyd etc.) are mapped by a
+                // running Hermes/python process — Windows refuses to replace a
+                // loaded DLL (os error 5, verified on the cryptography 48→50
+                // upgrade; the desktop backend python.exe loads _rust.pyd, and
+                // `import hermes_cli.main` itself does NOT load cryptography,
+                // so it is not the update process locking itself — 2026-08-15
+                // reattribution). The update process has exited by now, so a
+                // STANDALONE uv install (Rust process, never loads
+                // cryptography) can finish the deps once the lock is released.
+                // Best-effort: if it succeeds, continue the update; otherwise
+                // fall through to the failure dialog.
                 string uvBin = Path.Combine(root, "data", "hermes-home", "bin", "uv.exe");
                 string repoDir = Path.Combine(root, "data", "hermes-home", "hermes-agent");
                 string venvPython = Path.Combine(repoDir, "venv", "Scripts", "python.exe");

@@ -73,7 +73,7 @@ internal static class Program
                     }
                     if (oldAlive)
                     {
-                        return Fail("防重入检查", 0,
+                        return Fail("防重入", 1,
                             "另一个 Update.exe 正在运行（PID " + oldPid + "）。请等待其完成后再试。",
                             "", diagLog);
                     }
@@ -90,7 +90,7 @@ internal static class Program
             // root to exit; if it never does, abort BEFORE touching anything.
             if (!WaitForRootProcessesExit(root, 30))
             {
-                return Fail("进程占用检查", 0,
+                return Fail("进程占用", 1,
                     "Hermes 仍在运行（30 秒内未退出）。请完全退出 Hermes 后重新运行 Update.exe。未做任何更改。",
                     "", diagLog);
             }
@@ -143,7 +143,16 @@ internal static class Program
             // app afterwards anyway, so nothing is lost. Best-effort: if the
             // stop fails the update still runs and may hit the lock again.
             StopPortableProcesses(root);
-            rc = RunCaptured(cli, "-m hermes_cli.main update", root, out output);
+            // Record the source commit before the official update so a later
+            // standalone-uv fallback can prove the source actually advanced.
+            // A fallback that succeeds while HEAD is unchanged means the git
+            // step failed (e.g. network) — continuing would report a fake
+            // success with un-updated source.
+            string headBefore = RunGitHead(gitBin, checkoutDir, root);
+            // hermes-cli.cmd already wraps `python -m hermes_cli.main %*`, so
+            // pass the bare subcommand; a redundant "-m hermes_cli.main" only
+            // works by accident (it parses as --model + parse_known_args).
+            rc = RunCaptured(cli, "update", root, out output);
             if (rc != 0)
             {
                 AppendDiag(diagLog, "官方更新 (hermes update)", rc, output);
@@ -168,8 +177,21 @@ internal static class Program
                     int uvRc = RunCaptured(uvBin, "pip install --python \"" + venvPython + "\" -e .", repoDir, out output);
                     if (uvRc == 0)
                     {
-                        Console.WriteLine("✓ 独立 uv 依赖安装完成。");
-                        rc = 0;
+                        string headAfter = RunGitHead(gitBin, repoDir, root);
+                        if (headBefore.Length > 0 && headAfter != headBefore)
+                        {
+                            Console.WriteLine("✓ 独立 uv 依赖安装完成，源码已更新。");
+                            rc = 0;
+                        }
+                        else
+                        {
+                            // The git step itself failed (network/conflict) and
+                            // the source did not advance; installing deps alone
+                            // must not report a completed update.
+                            AppendDiag(diagLog, "独立 uv 依赖安装", 0,
+                                "依赖已安装但源码未更新（HEAD 未前进：" + headBefore + "）。");
+                            Console.WriteLine("✗ 依赖已安装，但源码未更新（git 步骤失败）。");
+                        }
                     }
                     else
                     {
@@ -270,7 +292,7 @@ internal static class Program
     private static int Fail(string step, int rc, string message, string output, string diagLog)
     {
         AppendDiag(diagLog, step, rc, output);
-        MessageBox.Show("更新失败：" + step + "失败（退出码 " + rc + "）。\n\n" + message + "\n\n详细日志：" + diagLog,
+        MessageBox.Show("更新失败：" + step + "（退出码 " + rc + "）。\n\n" + message + "\n\n详细日志：" + diagLog,
             "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
         return Finish(rc, step + " failed with exit code " + rc);
     }
@@ -378,8 +400,16 @@ internal static class Program
 
     // Run a child process, streaming its output to this console in real time
     // while capturing it for the diagnostic log. Async event handlers avoid
-    // the classic ReadToEnd/WaitForExit deadlock.
+    // the classic ReadToEnd/WaitForExit deadlock. The 5-arg overload with
+    // silent=true still CAPTURES everything but skips the console forwarding —
+    // for quiet probes (e.g. `git rev-parse HEAD`) whose stdout is meaningless
+    // to the user and would only clutter the update console.
     private static int RunCaptured(string file, string args, string cwd, out string output)
+    {
+        return RunCaptured(file, args, cwd, false, out output);
+    }
+
+    private static int RunCaptured(string file, string args, string cwd, bool silent, out string output)
     {
         var sb = new StringBuilder();
         var psi = new ProcessStartInfo
@@ -396,11 +426,11 @@ internal static class Program
         {
             p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
             {
-                if (e.Data != null) { lock (sb) { sb.AppendLine(e.Data); } Console.WriteLine(e.Data); }
+                if (e.Data != null) { lock (sb) { sb.AppendLine(e.Data); } if (!silent) Console.WriteLine(e.Data); }
             };
             p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
             {
-                if (e.Data != null) { lock (sb) { sb.AppendLine(e.Data); } Console.Error.WriteLine(e.Data); }
+                if (e.Data != null) { lock (sb) { sb.AppendLine(e.Data); } if (!silent) Console.Error.WriteLine(e.Data); }
             };
             p.BeginOutputReadLine();
             p.BeginErrorReadLine();
@@ -426,8 +456,15 @@ internal static class Program
         try
         {
             string safeRoot = root.Replace("'", "''");
+            // Directory-boundary match: root has no trailing separator
+            // (BaseDirectory was TrimEnd'd), so a bare -like '<root>*' would
+            // ALSO match a DIFFERENT install whose path merely begins with this
+            // root (e.g. "...-Portable-2\..." or "...-Portable-Beta\...") and
+            // kill its live Hermes/python — same bug class as IsForeignServe's
+            // bare StartsWith. Prefer StartsWith over -like so a '[' in the
+            // path cannot act as a wildcard either.
             string ps = "Get-Process Hermes,python -ErrorAction SilentlyContinue | " +
-                        "Where-Object { $_.Path -like '" + safeRoot + "*' } | " +
+                        "Where-Object { $_.Path.StartsWith('" + safeRoot + "\\', [System.StringComparison]::OrdinalIgnoreCase) } | " +
                         "Stop-Process -Force";
             string ignored;
             RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"" + ps + "\"", root, out ignored);
@@ -437,14 +474,23 @@ internal static class Program
 
     private static string FindForeignDashboardPids(string root)
     {
-        // wmic /FORMAT:LIST emits Property=Value lines per process, records
-        // separated by blank lines. Collect (pid, cmdline, exe) trios and keep
-        // the pids whose command line mentions serve/dashboard but whose
-        // executable does not live under this portable root.
+        // wmic.exe is removed on Windows 11 24H2+, so enumerate via PowerShell
+        // Get-CimInstance (Win32_Process). Keep every serve/dashboard process
+        // whose executable is NOT under this portable root — the official
+        // `hermes update` cleanup stops all of them by command-line match, so
+        // they must be listed in HERMES_DESKTOP_CHILD_PID to survive. Directory
+        // boundary: root has no trailing separator, so compare against
+        // '<root>\*' (a bare '<root>*' would also match "...-Portable-2\...").
+        string safeRoot = root.Replace("'", "''");
+        string ps = "Get-CimInstance Win32_Process | Where-Object { " +
+                    "$_.ExecutablePath -and ($_.CommandLine -match 'serve|dashboard') -and " +
+                    "($_.ExecutablePath -notlike '" + safeRoot + "\\*') } | " +
+                    "ForEach-Object { $_.ProcessId }";
         var psi = new ProcessStartInfo
         {
-            FileName = "wmic.exe",
-            Arguments = "process get ProcessId,CommandLine,ExecutablePath /FORMAT:LIST",
+            FileName = "powershell.exe",
+            Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + ps + "\"",
+            WorkingDirectory = root,
             UseShellExecute = false,
             RedirectStandardOutput = true,
             CreateNoWindow = true
@@ -454,40 +500,29 @@ internal static class Program
         {
             string output;
             using (var p = Process.Start(psi)) { output = p.StandardOutput.ReadToEnd(); p.WaitForExit(); }
-            string pid = "", cmd = "", exe = "";
             foreach (string raw in output.Split('\n'))
             {
                 string line = raw.Trim();
-                if (line.Length == 0)
-                {
-                    if (IsForeignServe(pid, cmd, exe, root)) found.Add(pid);
-                    pid = ""; cmd = ""; exe = "";
-                }
-                else if (line.StartsWith("ProcessId=")) pid = line.Substring("ProcessId=".Length).Trim();
-                else if (line.StartsWith("CommandLine=")) cmd = line.Substring("CommandLine=".Length);
-                else if (line.StartsWith("ExecutablePath=")) exe = line.Substring("ExecutablePath=".Length).Trim();
+                if (line.Length > 0) found.Add(line);
             }
-            if (IsForeignServe(pid, cmd, exe, root)) found.Add(pid);
         }
         catch { }
         return string.Join(",", found.ToArray());
     }
-
-    private static bool IsForeignServe(string pid, string cmd, string exe, string root)
-    {
-        // root has no trailing separator (BaseDirectory was TrimEnd'd). A bare
-        // StartsWith(root) would also match a DIFFERENT install whose path merely
-        // begins with this root (e.g. "...-Portable-Beta\..." or "...Portable 2\..."),
-        // misclassifying its serve/dashboard process as "inside this root" and
-        // leaving it unprotected from the official updater's kill sweep. Compare
-        // against the directory boundary instead.
-        if (pid.Length == 0 || cmd.Length == 0 || exe.Length == 0) return false;
-        string rootPrefix = root + Path.DirectorySeparatorChar;
-        bool underRoot = exe.Equals(root, StringComparison.OrdinalIgnoreCase) ||
-            exe.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase);
-        return !underRoot &&
-            (cmd.IndexOf("serve", StringComparison.OrdinalIgnoreCase) >= 0 ||
-             cmd.IndexOf("dashboard", StringComparison.OrdinalIgnoreCase) >= 0);
-    }
     private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
+
+    // Best-effort source commit probe. rev-parse failures surface as stderr
+    // inside the captured output, so both the "before" and "after" probes
+    // fail identically and the caller's equality check stays conservative.
+    // Runs SILENT: the hash is meaningless to the user on the update console.
+    private static string RunGitHead(string gitExe, string repoDir, string cwd)
+    {
+        try
+        {
+            string head;
+            RunCaptured(gitExe, "-C " + Quote(repoDir) + " rev-parse HEAD", cwd, true, out head);
+            return head == null ? "" : head.Trim();
+        }
+        catch { return ""; }
+    }
 }

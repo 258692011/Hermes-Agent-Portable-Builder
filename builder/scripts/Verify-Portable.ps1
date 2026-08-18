@@ -1,7 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $ToolsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ToolsDir
-if ((Split-Path $Root -Leaf) -eq 'hermes-portable-builder') { $Root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $Root)) }
 $HomeDir = Join-Path $Root 'data\hermes-home'
 $PythonPointer = Join-Path $Root 'runtime\python\current.txt'
 if (-not (Test-Path $PythonPointer)) {
@@ -23,7 +22,7 @@ $Checks = [ordered]@{
   Node = Join-Path $HomeDir 'node\node.exe'
   Npm = Join-Path $HomeDir 'node\npm.cmd'
   # corepack body + shim: the official Node zip bundles corepack, but the
-  # Ensure-OfficialNpm npm upgrade (Build-Hermes-Portable.ps1) prunes
+  # Ensure-OfficialNpm npm upgrade (Hermes.ps1) prunes
   # node_modules\corepack, leaving dead shims (verified 2026-08-14). Gate on
   # the body file so a pruned corepack fails the build.
   Corepack = Join-Path $HomeDir 'node\node_modules\corepack\dist\corepack.js'

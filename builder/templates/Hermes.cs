@@ -101,7 +101,7 @@ internal static class Program
     // exit (success, step failure, gate abort, crash). Surface a FAILED result
     // once on the next launch so a detached update never ends silently, then
     // consume (delete) the file either way. A success result is silently
-    // consumed. (Pair with Update-Hermes.cs Finish().)
+    // consumed. (Pair with Update.cs Finish().)
     private static void ShowUpdateResultIfFailed(string root, string home)
     {
         string resultPath = Path.Combine(home, ".hermes-update-result.json");

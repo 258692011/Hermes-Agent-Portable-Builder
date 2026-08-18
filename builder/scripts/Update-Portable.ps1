@@ -10,7 +10,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $ToolsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ToolsDir
-if ((Split-Path $Root -Leaf) -eq 'hermes-portable-builder') { $Root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $Root)) }
 $HermesHome = Join-Path $Root 'data\hermes-home'
 $Repo = Join-Path $HermesHome 'hermes-agent'
 
@@ -179,7 +178,6 @@ $backendPatch2End
     $zoomTestEol = $zoomTestInfo.Eol
     $officialZoom = 'Math.log(0.9) / Math.log(ZOOM_FACTOR_BASE)'
     $portableZoom = 'Math.log(1.0) / Math.log(ZOOM_FACTOR_BASE)'
-    $changesZoomDefault = -not $zoomText.Contains($portableZoom)
     $officialZoomRestore = "win.webContents.on('did-finish-load', () => restorePersistedZoomLevel(win))"
     $portableZoomRestore = @'
 win.webContents.on('did-finish-load', () => {
@@ -311,7 +309,7 @@ if (process.platform === 'win32') {
     process.env.UV_PYTHON_INSTALL_BIN ||= '0'
     process.env.UV_PYTHON_INSTALL_REGISTRY ||= '0'
     process.env.HERMES_PORTABLE_SITE_PACKAGES ||= path.join(portableHome, 'hermes-agent', 'venv', 'Lib', 'site-packages')
-    // Mirror the root launcher (Hermes-Desktop.cs): pin the backend to the
+    // Mirror the root launcher (Hermes.cs): pin the backend to the
     // bundled runtime python via current.txt so the venv trampoline (whose
     // pyvenv.cfg home records the builder's build tree) is never used.
     try {
@@ -337,10 +335,11 @@ if (process.platform === 'win32') {
 '@
 
     if (-not $text.Contains($startMarker)) {
-        if ($changesZoomDefault) {
-            if (-not $zoomText.Contains($officialZoom)) {
-                throw 'Portable zoom default insertion point was not found.'
-            }
+        # Ownership marker is written ONLY when the official default is 90%
+        # and the zoom default is actually rewritten to 100%. When the official
+        # default is already 100% the rewrite is a no-op; marking it owned would
+        # make PatchRemove wrongly revert 100% -> 90%.
+        if ($zoomText.Contains($officialZoom)) {
             $block = $block.Replace($startMarker, $startMarker + "`n" + $zoomOwnershipMarker)
         }
         $text = $text.Replace($needle, $block + $needle)
@@ -362,10 +361,10 @@ if (process.platform === 'win32') {
         $text = $text.Replace($backendNeedle2, $backendBlock2)
     }
     Write-TextWithOriginalEol $Main $text $mainEol
-    if ($changesZoomDefault) {
-        $zoomText = $zoomText.Replace($officialZoom, $portableZoom)
-        Write-TextWithOriginalEol $Zoom $zoomText $zoomEol
-    }
+    # Always normalize the zoom default to 100%. When the official default is
+    # already 100% (portableZoom present), the Replace is a no-op.
+    $zoomText = $zoomText.Replace($officialZoom, $portableZoom)
+    Write-TextWithOriginalEol $Zoom $zoomText $zoomEol
     $officialTestBlock = @'
 test('default zoom matches the Appearance 90% preset', () => {
   assert.equal(ZOOM_STEP, 0.1)
@@ -380,10 +379,8 @@ test('default zoom matches the Portable Appearance 100% preset', () => {
   assert.equal(DEFAULT_ZOOM_LEVEL, percentToZoomLevel(100))
 })
 '@.Trim()
-    if ($changesZoomDefault) {
-        $zoomTestText = $zoomTestText.Replace($officialTestBlock, $portableTestBlock)
-        Write-TextWithOriginalEol $ZoomTest $zoomTestText $zoomTestEol
-    }
+    $zoomTestText = $zoomTestText.Replace($officialTestBlock, $portableTestBlock)
+    Write-TextWithOriginalEol $ZoomTest $zoomTestText $zoomTestEol
     Write-Host "Portable Desktop source patch applied (default zoom 100%): $Main"
 }
 

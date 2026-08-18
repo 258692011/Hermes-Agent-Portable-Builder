@@ -189,7 +189,7 @@ Prefer an unpacked-directory ZIP over electron-builder's single-file portable ta
 A working layout used separate immutable-ish application/runtime payloads and mutable data:
 
 ```text
-Hermes-Agent-Desktop-Portable-win-x64/
+Hermes-Agent-Portable-win-x64/
 ├─ app/
 │  ├─ Hermes.exe
 │  ├─ portable.marker
@@ -319,7 +319,7 @@ Do not consider the update path fully verified until a real upstream update or c
 
 A Portable release must distinguish runtime payload from user state. Do not archive a staging tree after launching it unless writable state is sanitized again.
 
-For a fresh Hermes Desktop ZIP, keep `data/electron-user-data/` empty. Under `data/hermes-home/`, retain the complete 官方 `hermes-agent` 源码, bundled `node`, bundled `git`, managed `bin` tools; the archive ships WITHOUT `config.yaml` — the stage is assembled from an unlaunched upstream 源码 so the file never exists in the normal flow, and the build fail-closes around it (early defensive `$ConfigPath` remove + throw in `Build-Hermes-Portable.ps1`, plus the contract gate's final absence check; verified 2026-08-13). The first-run launcher writes the minimal `config.yaml` (`display.language: zh`) only when the file is absent (`Hermes-Desktop.cs::EnsureFirstRunConfig` `FileMode.CreateNew`), so user config is never overwritten. Exclude `.env`, `auth.json`, `state.db*`, sessions, logs, memories, caches, state snapshots, profiles, pairing state, and other test/user artifacts.
+For a fresh Hermes Desktop ZIP, keep `data/electron-user-data/` empty. Under `data/hermes-home/`, retain the complete 官方 `hermes-agent` 源码, bundled `node`, bundled `git`, managed `bin` tools; the archive ships WITHOUT `config.yaml` — the stage is assembled from an unlaunched upstream 源码 so the file never exists in the normal flow, and the build fail-closes around it (early defensive `$ConfigPath` remove + throw in `Hermes.ps1`, plus the contract gate's final absence check; verified 2026-08-13). The first-run launcher writes the minimal `config.yaml` (`display.language: zh`) only when the file is absent (`Hermes.cs::EnsureFirstRunConfig` `FileMode.CreateNew`), so user config is never overwritten. Exclude `.env`, `auth.json`, `state.db*`, sessions, logs, memories, caches, state snapshots, profiles, pairing state, and other test/user artifacts.
 
 Hermes Desktop persists onboarding decisions in Electron localStorage. At the July 2026 source baseline the relevant keys are:
 
@@ -348,14 +348,14 @@ A full platform test suite may contain upstream POSIX fixture failures on Window
 
 ## External Builder-owned release templates and contract gate
 
-`D:\Hermes-Agent-Portable-Builder\builder` carries these inputs outside the 官方源码. The build installs the non-official skill at `<portable-root>\data\hermes-home\skills\software-development\hermes-portable-builder`; official source remains under `upstream` / `data\hermes-home\hermes-agent` with no Portable commits:
+`D:\Hermes-Agent-Portable-Builder\builder` carries these inputs outside the 官方源码. The build installs the non-official skill at `<portable-root>\data\hermes-home\skills\software-development\hermes-agent-portable-builder`; official source remains under `upstream` / `data\hermes-home\hermes-agent` with no Portable commits:
 
 - `templates/hermes-cli.cmd` — pointer-only CLI launcher; never hard-codes a CPython patch directory.
 - `scripts/Update-Portable.ps1` — the merged repair/update helper (single script, `-Stage Repair|Patch|PatchRemove|SyncDesktop`) that parses the embedded 源码的 current `scripts/install.ps1` `$PythonVersion`, passes it to `uv python install/find`, validates major/minor, rebuilds the venv, and updates `current.txt` transactionally; the Patch/PatchRemove stages apply/remove the marker-bounded Desktop source patch (build-time `-RepoPath`, deployed `-PortableRoot`); the SyncDesktop stage rebuilds Desktop/TUI/Web and atomically swaps `app`.
 - `templates/README.txt` — release README template; the public CLI path is `runtime\\bin\\hermes-cli.cmd` and there is no root `Hermes-CLI.exe`.
-- `Build-Hermes-Portable.ps1` embeds the two release gates as in-script functions (merged into the build script 2026-08-10): `Test-PortablePythonContract` rejects a mismatched Python selector/runtime, hard-coded launcher directory, obsolete root CLI executable, or stale README path, and enforces the MCP import regression probe; `Test-PortableNoEditableInstall` rejects non-relocatable editable metadata (`__editable__*`, `*.egg-link`) and build-root absolute paths in `.pth` files.
+- `Hermes.ps1` embeds the two release gates as in-script functions (merged into the build script 2026-08-10): `Test-PortablePythonContract` rejects a mismatched Python selector/runtime, hard-coded launcher directory, obsolete root CLI executable, or stale README path, and enforces the MCP import regression probe; `Test-PortableNoEditableInstall` rejects non-relocatable editable metadata (`__editable__*`, `*.egg-link`) and build-root absolute paths in `.pth` files.
 
-At assembly time (Build-Hermes-Portable.ps1), render the README metadata placeholders from the actual 源码 and runtime probes, copy these templates into the staged tree, omit `Hermes-CLI.exe`, then run the two contract gates (now in-process):
+At assembly time (Hermes.ps1), render the README metadata placeholders from the actual 源码 and runtime probes, copy these templates into the staged tree, omit `Hermes-CLI.exe`, then run the two contract gates (now in-process):
 
 ```powershell
 Invoke-NativeChecked 'Portable Python contract test' { Test-PortablePythonContract $Stage | Out-Host }
@@ -404,7 +404,7 @@ git check-attr eol text -- apps/desktop/electron/main.ts   # unspecified
 
 ### 因果链
 
-1. **构建流程**（Build-Hermes-Portable.ps1）：打补丁 `Update-Portable.ps1 -Stage Patch -RepoPath $Repo`
+1. **构建流程**（Hermes.ps1）：打补丁 `Update-Portable.ps1 -Stage Patch -RepoPath $Repo`
    → 桌面构建 → finally 里 `-Stage PatchRemove` 移除补丁。
 2. 补丁脚本每次读取 3 个文件都**无条件 CRLF→LF**（`[IO.File]::ReadAllText(...).Replace("`r`n", "`n")`，第 63–65 行），
    所有写回都用 `WriteAllText($path, $text, [UTF8Encoding]::new($false))`（第 147/151/155/173/246/263/266/284 行）→ 写 LF。
@@ -522,7 +522,7 @@ After runtime verification, stop all processes under the fixture root, empty Ele
 Companion to `portable-install-diagnosis.md`. After the diagnosis (2026-08-04),
 the user's builder project at `D:\Hermes-Agent-Portable-Builder` was modified so
 FUTURE builds ship a working browser dashboard out of the box. Deployed copies in
-the running portable (`D:\Hermes-Agent-Desktop-Portable`) were synced byte-
+the running portable (`D:\Hermes-Agent-Portable`) were synced byte-
 identically and verified live.
 
 ### Design principle
@@ -536,7 +536,7 @@ identically and verified live.
 
 ### File-by-file edits
 
-#### 1. `builder/templates/Build-Hermes-Portable.ps1`
+#### 1. `builder/templates/Hermes.ps1`
 
 After the TUI bundle step (`Copy-Item ... 'ui-tui\dist\entry.js' ...`) and BEFORE
 the `package-lock.json` restore guard (one guard then covers BOTH installs):
@@ -652,14 +652,14 @@ The `.cmd` change covers the realistic paths with zero upstream patch surface.
 ## Portable-install diagnosis: "Desktop IPC bridge is unavailable."
 
 First encounter: 2026-08-04, Hermes Desktop Portable at
-`D:\Hermes-Agent-Desktop-Portable`. `hermes dashboard` started fine and served
+`D:\Hermes-Agent-Portable`. `hermes dashboard` started fine and served
 http://127.0.0.1:9119, but the page (opened in the desktop app's preview pane)
 showed the toast **"Desktop IPC bridge is unavailable."** and the chat was disabled.
 
 ### Symptom chain
 
 1. `hermes dashboard --no-open` printed:
-   `Using web dist from HERMES_WEB_DIST: D:\Hermes-Agent-Desktop-Portable\app\resources\app.asar.unpacked\dist`
+   `Using web dist from HERMES_WEB_DIST: D:\Hermes-Agent-Portable\app\resources\app.asar.unpacked\dist`
 2. The served SPA was the DESKTOP bundle:
    - `index.html` → `assets/index-B_vYUFp_.js` (desktop build).
    - That bundle contains boot code (connection hook `cGe` in the minified JS):
@@ -697,10 +697,10 @@ showed the toast **"Desktop IPC bridge is unavailable."** and the chat was disab
 ### Verified fix (exact commands)
 
 ```bash
-cd "D:/Hermes-Agent-Desktop-Portable/data/hermes-home/hermes-agent/web"
+cd "D:/Hermes-Agent-Portable/data/hermes-home/hermes-agent/web"
 npm install --no-audit --no-fund && npm run build
-export HERMES_WEB_DIST="D:/Hermes-Agent-Desktop-Portable/data/hermes-home/hermes-agent/hermes_cli/web_dist"
-"D:/Hermes-Agent-Desktop-Portable/runtime/bin/hermes-cli.cmd" dashboard --no-open
+export HERMES_WEB_DIST="D:/Hermes-Agent-Portable/data/hermes-home/hermes-agent/hermes_cli/web_dist"
+"D:/Hermes-Agent-Portable/runtime/bin/hermes-cli.cmd" dashboard --no-open
 curl -s http://127.0.0.1:9119/ | grep -oE '__HERMES_SESSION_TOKEN__|index-[A-Za-z0-9_]+\.js' | sort -u
 # expect: __HERMES_SESSION_TOKEN__ + the NEW bundle name (e.g. index-Cv1Lntuh.js)
 ```
@@ -854,7 +854,7 @@ CSC="$WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 "$CSC" /nologo /target:exe /platform:anycpu /optimize+ `
   "/win32icon:<repo>\apps\desktop\assets\icon.ico" `
   "/out:<target>\Update.exe" /reference:System.Windows.Forms.dll `
-  "<template>\Update-Hermes.cs"
+  "<template>\Update.cs"
 ```
 
 - `/target:exe` = console app (visible console window); `/target:winexe` = no
@@ -1057,7 +1057,7 @@ Merged from the standalone `windows-powershell-build-execution` skill on 2026-08
 `powershell.exe -File build.ps1 2>&1 | tee log | tail -100` makes the shell's
 exit status that of `tail`, not PowerShell. A script that dies mid-run under
 `$ErrorActionPreference='Stop'` still reports a pipeline "success": verified
-2026-08-10 with `Build-Hermes-Portable.ps1` — the background process reported
+2026-08-10 with `Hermes.ps1` — the background process reported
 "completed normally (exit code 0)" while the log showed a terminating
 `Get-Content : 找不到路径...` at line 581 and a dead build. The `$?`/exit
 code of the LAST command in the pipeline is all the caller sees.
@@ -1123,7 +1123,7 @@ hoisting. npm hoists a workspace dependency to the ROOT `node_modules` only
 when the root manifest also participates; a dependency declared solely in a
 workspace (e.g. `electron` in `apps/desktop/package.json` after upstream
 removed it from root `package.json`) stays in
-`<workspace>/node_modules/`. Verified 2026-08-10: `Build-Hermes-Portable.ps1`
+`<workspace>/node_modules/`. Verified 2026-08-10: `Hermes.ps1`
 died reading `node_modules\electron\package.json`; the fallback
 `apps\desktop\node_modules\electron\package.json` fixed it. When a
 version-lookup fails, check BOTH root and workspace `node_modules`, and make
@@ -1191,7 +1191,7 @@ rather than trusting `ls node_modules`.
   decodes redirected stdout/stderr with `Console.OutputEncoding` — the OEM
   code page (GBK/936 on zh-CN). UTF-8-only characters in child output (e.g.
   npm postinstall's `\u2705` checkmark) then render as `?`. Verified 2026-08-10
-  in `Update-Hermes.cs`: the fix is `Console.OutputEncoding = Encoding.UTF8`
+  in `Update.cs`: the fix is `Console.OutputEncoding = Encoding.UTF8`
   BEFORE any child spawn (this governs both the Process decode and the console
   display), plus `Environment.SetEnvironmentVariable("PYTHONIOENCODING","utf-8")`
   and `PYTHONUTF8=1` (bundled Python emits GBK when its stdout is a pipe
@@ -1435,7 +1435,7 @@ with 58.9 MB saved). Back off between attempts (5-8s) and keep the size
 floor — a "successful" download smaller than the known archive size is a
 truncated one.
 
-In `Build-Hermes-Portable.ps1` (2026-08-08) the retry contract is unified:
+In `Hermes.ps1` (2026-08-08) the retry contract is unified:
 `Invoke-DownloadWithRetry -Uri <url> -OutFile <file> [-Label <name>]`
 retries 3x with a 5s pause (same shape as the git clone / PortableGit /
 7-Zip sites), and `-ReturnContent` returns the response body (used for the
@@ -1467,7 +1467,7 @@ archive size exists.
 - GitHub / git connectivity diagnosis (network-outage ladder, retry
   strategy): see the `github-connectivity-diagnostics` skill.
 - Project-specific detail (Hermes Portable Builder scripts, exact line
-  numbers, 2026-08 case study): the `hermes-portable-builder` skill's
+  numbers, 2026-08 case study): the `hermes-agent-portable-builder` skill's
   Pitfalls section.
 
 ---
@@ -1476,14 +1476,14 @@ archive size exists.
 
 ## Update.exe Error-Dialog Redesign & Update-Failure Diagnosis (2026-08-06)
 
-Session context: the Hermes Portable (`D:\Hermes-Agent-Desktop-Portable`) failed
+Session context: the Hermes Portable (`D:\Hermes-Agent-Portable`) failed
 `hermes update` twice with a bare `System.Exception: Official Hermes update
 failed with exit code 1.` dialog. Root cause was a transient github.com network
 outage, but the dialog gave the user no reason. This reference records the
 dialog redesign, the byte-verification recipe, the propagation workflow, and
 the network-diagnosis ladder.
 
-### 1. Failure dialog redesign (builder\templates\Update-Hermes.cs)
+### 1. Failure dialog redesign (builder\templates\Update.cs)
 
 Four dialog shapes, all title "Hermes Update":
 
@@ -1491,8 +1491,10 @@ Four dialog shapes, all title "Hermes Update":
    `更新失败：无法完成官方 Hermes 更新（退出码 N）。\n\n` +
    `ClassifyUpdateError(output)` + `\n\n详细日志：<diagLog>`
 2. **Step failure** (Error icon) via `Fail(step, rc, message, output, diagLog)`:
-   `更新失败：<step>失败（退出码 N）。\n\n<message>\n\n详细日志：<diagLog>`
-   (steps: 便携环境修复 / 移除便携补丁 / 更新 Python 运行时 / 桌面同步)
+   `更新失败：<step>（退出码 N）。\n\n<message>\n\n详细日志：<diagLog>`
+   (steps: 进程占用 / 防重入 / 便携环境修复 / 移除便携补丁 / 更新 Python 运行时 / 桌面同步;
+   the two fail-closed gates pass `rc=0` because no child command ran — the
+   step name carries the meaning, no "失败" suffix is appended by the template)
 3. **Update OK but auto-launch failed** (Warning icon): `更新已完成，但无法
    自动启动 Hermes：\n<ex>\n\n请手动启动 Hermes.exe。`
 4. **Uncaught exception** (Error icon): `更新失败：发生未预期的错误。\n\n<ex>\n\n详细日志：<diagLog>`
@@ -1575,10 +1577,10 @@ Observed: 18 differing bytes total — 2 at 136–137 (PE header area) and 16 at
 
 Propagate to ALL copies in one pass (verified 2026-08-06):
 
-1. Edit `builder\templates\Update-Hermes.cs`; re-save UTF-8 **with BOM**
+1. Edit `builder\templates\Update.cs`; re-save UTF-8 **with BOM**
    (`[IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($true))`).
 2. Compile stage: `/out:D:\Hermes-Agent-Portable-Builder\stage\...\Update.exe`
-3. Compile deployed: `/out:D:\Hermes-Agent-Desktop-Portable\Update.exe`
+3. Compile deployed: `/out:D:\Hermes-Agent-Portable\Update.exe`
    (same csc line incl. `/win32icon:<repo>\apps\desktop\assets\icon.ico`).
 4. Re-render README.txt everywhere from `builder\templates\README.txt` with
    the same `{{VAR}}` substitution the build uses — extract the current

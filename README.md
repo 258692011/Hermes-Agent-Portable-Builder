@@ -34,14 +34,14 @@ npm 升级命令会清掉官方捆绑的 corepack，因此脚本在升级前读�
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  D:\Hermes-Agent-Portable-Builder\builder\templates\Build-Hermes-Portable.ps1 `
+  D:\Hermes-Agent-Portable-Builder\builder\templates\Hermes.ps1 `
   -SkipArchive
 ```
 
 输出：
 
 ```text
-D:\Hermes-Agent-Portable-Builder\stage\Hermes-Agent-Desktop-Portable
+D:\Hermes-Agent-Portable-Builder\stage\Hermes-Agent-Portable
 ```
 
 `-SkipArchive` 表示只组装 Portable 目录、跳过 ZIP 打包（压缩 32,000+ 个文件约需数分钟）构建
@@ -49,19 +49,19 @@ D:\Hermes-Agent-Portable-Builder\stage\Hermes-Agent-Desktop-Portable
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  D:\Hermes-Agent-Portable-Builder\builder\templates\Build-Hermes-Portable.ps1
+  D:\Hermes-Agent-Portable-Builder\builder\templates\Hermes.ps1
 ```
 
 输出：
 
 ```text
-D:\Hermes-Agent-Portable-Builder\dist\Hermes-Agent-Desktop-Portable-<版本>-win-x64-<时间戳>.zip
+D:\Hermes-Agent-Portable-Builder\dist\Hermes-Agent-Portable-<版本>-win-x64-<时间戳>.zip
 ```
 
 构建始终是完整流程，没有跳过 Desktop 重建的开关（曾有的 `-SkipDesktopBuild` 已于 2026-08-07 移除，
 因为它会让 Python 解析走不同路径、掩盖构建脚本缺陷；以后排查问题时只有一条构建路径可循）
 
-首次构建会直接在 `stage\Hermes-Agent-Desktop-Portable` 中组装出：uv、官方指定版本的
+首次构建会直接在 `stage\Hermes-Agent-Portable` 中组装出：uv、官方指定版本的
 Python、venv 与锁定依赖、官方指定主版本的 Node.js、PortableGit。其中 uv 二进制、Python
 运行时、Node.js、PortableGit 全部来自 `builder\assets\` 离线缓存（缓存缺失时才下载并回填
 缓存）；Python 依赖的 wheel 则走 uv 的构建机用户级缓存（Windows 默认
@@ -88,7 +88,7 @@ Node、Git 和 Electron 混装。缺少 uv 时用固定的 0.12.3；Python 依�
 构建机的 `builder\`，不会复制到成品或内嵌官方 Git 源码。Builder 管理的成品 data 种子源码位于
 `builder\data\`（`hermes-home\memories\`、`hermes-home\skills\` 等），整个目录树按原结构复制到成品对应的 `data\`
 
-技能目录中的 `SKILL.md` 与 `references\` 会按原结构复制（自 2026-08-12 起不再强制要求技能存在或精简，`hermes-portable-builder` 技能门禁已移除）。Portable 运行维护脚本
+技能目录中的 `SKILL.md` 与 `references\` 会按原结构复制（自 2026-08-12 起不再强制要求技能存在或精简，`hermes-agent-portable-builder` 技能门禁已移除）。Portable 运行维护脚本
 只保留一份在成品根 `scripts\`（`Update-Portable.ps1` + `Repair-Portable.ps1` + `Verify-Portable.ps1`）；
 构建脚本、测试、模板和 7-Zip 只属于构建项目，不进入成品。这样既能加载技能，又不会复制重复工具或构建源码
 
@@ -185,7 +185,7 @@ display:
 
 | | |
 |---|---|
-| 文件 | `builder\templates\Hermes-Desktop.cs`，编译为根目录 `Hermes.exe`。注意：这不是源码补丁，而是启动器自带的逻辑 |
+| 文件 | `builder\templates\Hermes.cs`，编译为根目录 `Hermes.exe`。注意：这不是源码补丁，而是启动器自带的逻辑 |
 | 改前 | 官方启动器不写配置文件：全新安装直接使用内置 `DEFAULT_CONFIG` |
 | 改后 | 发行包不含 `config.yaml`（见"用户配置保护"：构建中段有意外残留则**先删、删不掉即失败**——删除型 fail-closed 守卫；最终契约门禁再复核缺席），首启时 `EnsureFirstRunConfig()` 仅在文件**不存在**时原子创建最小配置：`display.language: zh` |
 | 效果 | 全新用户默认中文界面；配置一旦存在，启动器从此不再读写它，用户设置永不被打扰 |
@@ -256,7 +256,7 @@ McpImports: mcp-ok
 
 `Verify-Portable.ps1` 的库存检查还包含 `WebDist` 项（`hermes_cli\web_dist\index.html` 必须存在，否则独立网页端不可用）
 
-构建脚本内联的 Python 契约门禁（`Test-PortablePythonContract` 函数，2026-08-10 起内置于 `Build-Hermes-Portable.ps1`）必须输出：
+构建脚本内联的 Python 契约门禁（`Test-PortablePythonContract` 函数，2026-08-10 起内置于 `Hermes.ps1`）必须输出：
 
 ```text
 PortablePythonBootstrap: true

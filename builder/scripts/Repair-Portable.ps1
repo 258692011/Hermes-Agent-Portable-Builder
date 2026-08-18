@@ -15,7 +15,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $ToolsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ToolsDir
-if ((Split-Path $Root -Leaf) -eq 'hermes-portable-builder') { $Root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $Root)) }
 $HermesHome = Join-Path $Root 'data\hermes-home'
 $Repo = Join-Path $HermesHome 'hermes-agent'
 $Venv = Join-Path $Repo 'venv'

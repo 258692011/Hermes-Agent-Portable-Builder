@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 $Repo = Join-Path $BuilderRoot 'upstream'
 $StageParent = Join-Path $BuilderRoot 'stage'
-$Stage = Join-Path $StageParent 'Hermes-Agent-Desktop-Portable'
+$Stage = Join-Path $StageParent 'Hermes-Agent-Portable'
 $Dist = Join-Path $BuilderRoot 'dist'
 $Builder = Join-Path $BuilderRoot 'builder'
 $Templates = Join-Path $Builder 'templates'
@@ -33,7 +33,7 @@ $env:ELECTRON_BUILDER_CACHE = Join-Path $RuntimeCache 'electron-builder-cache'
 
 # Sanitize leaked managed-Python environment variables before any uv call.
 # A running Portable Hermes Desktop sets UV_PYTHON_INSTALL_DIR/BIN/REGISTRY
-# (Hermes-Desktop.cs, the main.ts patch, hermes-cli.cmd) and every agent/user
+# (Hermes.cs, the main.ts patch, hermes-cli.cmd) and every agent/user
 # terminal spawned from it inherits them, pointing uv at the LIVE portable's
 # runtime python whose DLLs are locked by the running backend. Without this,
 # any `uv python find <selector> --system` run before Install-ManagedPython
@@ -461,6 +461,42 @@ function Invoke-NativeChecked {
     $output
 }
 
+function Protect-CaseCollisionEntries([string]$Checkout) {
+    # Upstream can track two paths that differ only by case (observed
+    # 2026-08-17: contributors/emails/agent@Agents-Mac-mini.local vs
+    # agent@agents-Mac-mini.local — upstream commit 55db6187e added the
+    # upper-case variant while the lower-case one already existed). On
+    # Windows' case-insensitive filesystem only one of them can materialize
+    # in the working tree, so `git status --porcelain` reports the other as
+    # modified forever and the release gate below throws. Mark every
+    # duplicate whose HEAD blob differs from the working-tree content as
+    # skip-worktree so status stays clean; the flag then ships inside the
+    # packed .git index, which also keeps the user-side `hermes update`
+    # local-changes check clean (same failure class as the CRLF trap).
+    # WHY TWO CALL SITES (staged ~L771 and packaged ~L826): the flag lives
+    # per-entry inside .git\index, NOT in git config. A plain `git reset
+    # --hard` PRESERVES it (verified 2026-08-18), but the packaged-checkout
+    # block (1) replaces the whole .git with a fresh copy from upstream at
+    # L782-784 (that index carries no flags — upstream is a read-only mirror
+    # we never mark), and (2) `git rm -r --cached .` + `git reset --hard`
+    # rebuilds the index FROM HEAD, dropping any surviving flag. So the
+    # packaged status gate at L798 must re-run this protection after the
+    # index rewrite. Each call re-checks both variants because which one
+    # Windows materializes can differ per index rebuild (observed: stage
+    # check hid the lower-case entry, packaged check hid the upper-case).
+    $tracked = & git.exe -C $Checkout ls-files
+    foreach ($group in ($tracked | Group-Object { $_.ToLowerInvariant() } | Where-Object { $_.Count -gt 1 })) {
+        foreach ($path in $group.Group) {
+            $headBlob = (Invoke-NativeChecked 'Resolve HEAD blob for case-collision check' { & git.exe -C $Checkout rev-parse "HEAD:$path" }).Trim()
+            $wtBlob = (Invoke-NativeChecked 'Hash working-tree file for case-collision check' { & git.exe -C $Checkout hash-object -- $path }).Trim()
+            if ($headBlob -ne $wtBlob) {
+                Invoke-NativeChecked 'Mark case-collision entry skip-worktree' { & git.exe -C $Checkout update-index --skip-worktree -- $path | Out-Null }
+                Write-Host "Skip-worktree case-collision entry (Windows cannot materialize both): $path"
+            }
+        }
+    }
+}
+
 # Release gate (merged into the build script 2026-08-10): the staged venv
 # must be relocatable — no `__editable__*` / `*.egg-link` metadata
 # (editable installs embed the builder's absolute paths) and no build-root
@@ -553,9 +589,26 @@ function Test-PortablePythonContract([string]$Root) {
         $duplicates = Get-ChildItem $Root -Recurse -File -Filter $toolName | Where-Object { $_.FullName -ne $toolPath }
         if ($duplicates) { throw "Runtime tool has duplicate packaged copies: $toolName" }
     }
-    $trackedOverlay = & git.exe -C $Repo ls-files 'skills/software-development/hermes-portable-builder/*'
-    if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the embedded official checkout.' }
-    if ($trackedOverlay) { throw 'Portable overlay is still tracked inside the embedded official checkout.' }
+    # Portable overlay files (mirrored from builder\data) must never be
+    # tracked inside the embedded official checkout — same contract as the
+    # builder\data Copy-Tree: enumerate builder\data dynamically, so adding,
+    # renaming, or removing a seed (e.g. a skill) never needs a script edit.
+    # Overlay paths map into the checkout by stripping the leading
+    # "hermes-home/" segment (builder\data mirrors data\hermes-home, and the
+    # checkout sits at data\hermes-home\hermes-agent).
+    $builderData = Join-Path $Builder 'data'
+    $overlayTracked = @()
+    if (Test-Path $builderData) {
+        $overlayRels = @(Get-ChildItem $builderData -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $_.FullName.Substring($builderData.Length + 1).Replace('\\', '/') -replace '^hermes-home/', ''
+        })
+        if ($overlayRels.Count -gt 0) {
+            $tracked = @(& git.exe -C $Repo ls-files)
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the embedded official checkout.' }
+            $overlayTracked = @($tracked | Where-Object { $overlayRels -contains $_ })
+        }
+    }
+    if ($overlayTracked.Count -gt 0) { throw "Portable overlay is still tracked inside the embedded official checkout: $($overlayTracked -join ', ')" }
 
     if (Test-Path (Join-Path $Root 'Hermes-CLI.exe')) { throw 'Obsolete root Hermes-CLI.exe is present.' }
     if (-not (Test-Path $Readme)) { throw "README missing: $Readme" }
@@ -712,8 +765,8 @@ if (Test-Path $ConfigPath) { throw "Release must not contain user config: $Confi
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $officialIcon = Join-Path $Repo 'apps\desktop\assets\icon.ico'
 if (-not (Test-Path $officialIcon)) { throw "Official Hermes Desktop icon is missing: $officialIcon" }
-Invoke-NativeChecked 'Hermes launcher compilation' { & $csc /nologo /target:winexe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Hermes.exe" /reference:System.Windows.Forms.dll (Join-Path $Templates 'Hermes-Desktop.cs') }
-Invoke-NativeChecked 'Update launcher compilation' { & $csc /nologo /target:exe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Update.exe" /reference:System.Windows.Forms.dll (Join-Path $Templates 'Update-Hermes.cs') }
+Invoke-NativeChecked 'Hermes launcher compilation' { & $csc /nologo /target:winexe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Hermes.exe" /reference:System.Windows.Forms.dll (Join-Path $Templates 'Hermes.cs') }
+Invoke-NativeChecked 'Update launcher compilation' { & $csc /nologo /target:exe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Update.exe" /reference:System.Windows.Forms.dll (Join-Path $Templates 'Update.cs') }
 
 $package = Get-Content (Join-Path $Repo 'pyproject.toml') -Raw
 $hermesVersion = [regex]::Match($package, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
@@ -741,6 +794,7 @@ Invoke-NativeChecked 'Staged git config autocrlf' { & git.exe -C $Checkout confi
 Invoke-NativeChecked 'Staged git config eol' { & git.exe -C $Checkout config core.eol lf }
 Invoke-NativeChecked 'Staged git reset' { & git.exe -C $Checkout reset --hard $commit | Out-Null }
 Invoke-NativeChecked 'Staged git clean' { & git.exe -C $Checkout clean -fdx -e venv/ -e hermes_cli/tui_dist/ -e hermes_cli/web_dist/ | Out-Null }
+Protect-CaseCollisionEntries $Checkout
 if (Invoke-NativeChecked 'Staged git status' { & git.exe -C $Checkout status --porcelain }) { throw 'Embedded checkout is dirty before release.' }
 if (Invoke-NativeChecked 'Staged git stash list' { & git.exe -C $Checkout stash list }) { throw 'Embedded checkout has stale stashes before release.' }
 
@@ -795,6 +849,7 @@ Invoke-NativeChecked 'Packed git config eol' { & git.exe -C $Checkout config cor
 # (rm --cached forces reset to rewrite every file, bypassing the stat cache).
 Invoke-NativeChecked 'Packaged checkout git rm --cached' { & git.exe -C $Checkout rm -r --cached --quiet . }
 Invoke-NativeChecked 'Packaged checkout reset --hard' { & git.exe -C $Checkout reset --hard --quiet }
+Protect-CaseCollisionEntries $Checkout
 $packagedStatus = Invoke-NativeChecked 'Packaged checkout status' { & git.exe -C $Checkout status --porcelain }
 if ($packagedStatus) {
     throw "Packaged checkout is not clean (line-ending or stale-index mismatch?): $packagedStatus"
@@ -865,7 +920,7 @@ if ($SkipArchive) {
 } else {
     New-Item -ItemType Directory -Force $Dist | Out-Null
     $buildTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $zip = Join-Path $Dist "Hermes-Agent-Desktop-Portable-$hermesVersion-win-x64-$buildTimestamp.zip"
+    $zip = Join-Path $Dist "Hermes-Agent-Portable-$hermesVersion-win-x64-$buildTimestamp.zip"
     Remove-Item $zip -Force -ErrorAction SilentlyContinue
     # 7za.exe normally ships inside the repo (assets\7zip). If it is
     # missing (cloned without the asset, deleted, ...), restore it from the
@@ -914,7 +969,7 @@ if ($SkipArchive) {
         # -tzip with no -mx uses 7-Zip's default compression level (5, Normal);
         # deliberately not -mx=7 (Maximum) — 32k+ files compress at near-default
         # speed with only marginally larger output, and default is faster.
-        Invoke-NativeChecked 'ZIP creation' { & $sevenZip a -tzip $zip 'Hermes-Agent-Desktop-Portable' }
+        Invoke-NativeChecked 'ZIP creation' { & $sevenZip a -tzip $zip 'Hermes-Agent-Portable' }
     } finally { Pop-Location }
     if (-not (Test-Path $zip)) { throw 'ZIP creation failed.' }
     Write-Host "Portable release built: $zip"

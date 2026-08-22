@@ -1,6 +1,6 @@
 # Hermes Agent Portable Builder
 
-此目录是本机 Portable 构建系统，**不是**官方 Git 仓库的一部分；官方源码只存放在 `upstream\` 子目录中。
+此目录是本机 Portable 构建系统，不是官方 Git 仓库的一部分；官方源码只存放在 `upstream\` 子目录中。
 
 本构建器将 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 打包成免安装、可移动的 Windows x64 便携版：内嵌 Python + venv 依赖、Node.js、PortableGit、Electron 桌面端，用户数据通过 `HERMES_HOME` 等重定向到包内 `data\hermes-home\`，整包可复制、移动。
 
@@ -22,15 +22,15 @@ Hermes-Agent-Portable-Builder\
 
 ## 构建机要求
 
-当前只支持 **Windows 10/11 x64**。构建机需要：
+当前只支持 Windows 10/11 x64。构建机需要：
 
 | 软件 | 版本要求 | 是否必须预装 | 说明 |
 |---|---|---:|---|
 | Windows PowerShell | 5.1（Windows 自带） | 是 | 构建入口及维护脚本运行环境 |
-| Git for Windows | 当前固定 **2.55.0.3**（`v2.55.0.windows.3`，构建脚本硬编码） | 否 | 构建器**不读取系统**；从 `builder\assets\git\PortableGit\`（解压后的目录缓存）取进成品，缓存缺失才下载、解压并回填 |
-| Node.js + npm | 上游选择器 **22**；当前缓存 **v22.23.2**（npm 11.19.0） | 是（编译用） | 编译 Desktop、TUI 和运行 electron-builder 需要构建机上的 npm；打包进成品的 Node 运行时**不读取系统**，从 `builder\assets\node\node-v22.23.2-win-x64\`（解压后的目录缓存）取，缺失才从 nodejs.org 下载、解压并回填 |
-| uv | 构建器用固定 **0.12.3** | 否 | 构建器**不读取系统**；从 `builder\assets\uv\uv-x86_64-pc-windows-msvc\`（解压后的目录缓存）取，缺失才下载、解压并回填 |
-| Python | 当前上游选择器为 **3.11**；patch 版本不锁定 | 否 | 构建器**不读取系统**；从 `builder\assets\python\` 的解压目录取，缺失才由 uv 安装（下载后回填 assets 缓存） |
+| Git for Windows | 当前固定 2.55.0.3（`v2.55.0.windows.3`，构建脚本硬编码） | 否 | 构建器不读取系统；从 `builder\assets\git\PortableGit\`（解压后的目录缓存）取进成品，缓存缺失才下载、解压并回填 |
+| Node.js + npm | 上游选择器 22；当前缓存 v22.23.2（npm 11.19.0） | 是（编译用） | 编译 Desktop、TUI 和运行 electron-builder 需要构建机上的 npm；打包进成品的 Node 运行时不读取系统，从 `builder\assets\node\node-v22.23.2-win-x64\`（解压后的目录缓存）取，缺失才从 nodejs.org 下载、解压并回填 |
+| uv | 构建器用固定 0.12.3 | 否 | 构建器不读取系统；从 `builder\assets\uv\uv-x86_64-pc-windows-msvc\`（解压后的目录缓存）取，缺失才下载、解压并回填 |
+| Python | 当前上游选择器为 3.11；patch 版本不锁定 | 否 | 构建器不读取系统；从 `builder\assets\python\` 的解压目录取，缺失才由 uv 安装（下载后回填 assets 缓存） |
 | .NET Framework C# 编译器 | v4.0（Windows 10/11 自带） | 是（系统组件） | 使用 `Framework64\v4.0.30319\csc.exe` 编译 `Hermes.exe` 和 `Update.exe` |
 | 7za.exe（7-Zip 命令行版） | 随仓库内置 `builder\assets\7zip\7za.exe`（当前 26.02） | 否 | 通常随仓库自带；缺失时自动从 7-Zip 官网下载 extra 包恢复（下载后回填 assets 缓存） |
 
@@ -64,7 +64,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 1. 校验 Windows x64；校验/克隆官方源码到 `upstream\`（缺失或失败自动克隆，3 次重试）
 2. 清空并重建 `stage\Hermes-Agent-Portable`
 3. 解析托管组件（own assets 缓存优先 → 缺失下载并回填缓存）：uv 固定 0.12.3 → 官方选择器 Python（当前 3.11）→ 官方选择器 Node（主版本 22）→ PortableGit 固定 2.55.0.3
-4. 创建**可重定位** venv：`uv sync --extra all --locked --no-install-project --link-mode copy`（wheel 走 uv 构建机用户级缓存，离线优先、缺失才下载；不生成含构建绝对路径的 editable metadata）
+4. 创建可重定位 venv：`uv sync --extra all --locked --no-install-project --link-mode copy`（wheel 走 uv 构建机用户级缓存，离线优先、缺失才下载；不生成含构建绝对路径的 editable metadata）
 5. 按官方 `engines.npm` 要求升级包内 npm（不足时自动升级，升级后按官方捆绑版本重装 corepack）
 6. 对官方 Desktop 源码打便携补丁（`Update-Portable.ps1 -Stage Patch`）→ npm workspace 安装 + typecheck + build + electron-builder `--dir` → 立即 `-Stage PatchRemove` 还原（源码与官方逐字节一致）
 7. 网页端 workspace 安装 + `npm run build`（vite 输出到 `hermes_cli\web_dist\`），最后写入 `data\hermes-home\web-ui-build-stamp.json`（内容哈希）
@@ -105,11 +105,11 @@ Hermes-Agent-Portable\
   - `hermes-tui.cmd`：TUI 入口（`--tui`）
   - `hermes-dashboard.cmd`：网页端入口，解析 `--port N`/`--port=N`（默认 9119；`--port 0` 自动分配；端口已有服务则直接打开浏览器）
 - 数据随包走：`data\hermes-home\` 内所有用户数据跟随目录移动；覆盖升级不要先删旧 `data\`
-- 用户配置保护：发行包**不含** `data\hermes-home\config.yaml`；首启仅在文件不存在时原子创建最小配置 `display.language: zh`，已存在则完全不读写（见下节）
+- 用户配置保护：发行包不含 `data\hermes-home\config.yaml`；首启仅在文件不存在时原子创建最小配置 `display.language: zh`，已存在则完全不读写（见下节）
 
 ## 推理等级与 DeepSeek 的对应
 
-Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDER`：`minimal/low/medium/high/xhigh/max/ultra`，桌面端中文 UI 显示为 最小/低/中/高/极高/最高/超高）。DeepSeek 官方 API **只有 low / high / max 三档**（官方文档 [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)），`medium`/`xhigh` 作为请求值会被官方**静默映射成 high**。Hermes 各档在 DeepSeek 上的实际生效值如下：
+Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDER`：`minimal/low/medium/high/xhigh/max/ultra`，桌面端中文 UI 显示为 最小/低/中/高/极高/最高/超高）。DeepSeek 官方 API 只有 low / high / max 三档（官方文档 [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)），`medium`/`xhigh` 作为请求值会被官方静默映射成 high。Hermes 各档在 DeepSeek 上的实际生效值如下：
 
 | Hermes 中文 | 内部值 | DeepSeek 实际生效 | 说明 |
 |---|---|---|---|
@@ -124,9 +124,9 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 
 要点：
 
-- DeepSeek 官方档位只有 **low / high / max**；默认 effort 为 **high**（不设置时服务器默认）
+- DeepSeek 官方档位只有 low / high / max；默认 effort 为 high（不设置时服务器默认）
 - 官方映射表（`deepseek-v4-flash`/`deepseek-v4-pro` 相同）：`low→low`、`medium→high`、`high→high`、`xhigh→high`、`max→max`——即 Hermes 的"中/高/极高"三档在 DeepSeek 上实际都是 `high`
-- 归并策略是"只降不升"：Hermes 不支持的档位取最近**更弱**的支持等级，绝不静默升档
+- 归并策略是"只降不升"：Hermes 不支持的档位取最近更弱的支持等级，绝不静默升档
 - 对照 DeepSeek Harness（dsh）：dsh 对 `deepseek-v4-flash` 只声明 `off/low/high/max`，`medium` 会被直接拒绝（`UNSUPPORTED_REASONING_EFFORT`）；DeepSeek 官方则接受 `medium` 但映射成 `high`
 
 
@@ -136,8 +136,8 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 |---|---|
 | 问题 | 构建机上的配置（语言、密钥、MCP 等）绝不能混进发行包，否则会覆盖或污染用户自己的设置 |
 | 改前 | 官方安装没有"保护"概念：配置文件缺失时直接用内置 `DEFAULT_CONFIG`，界面语言跟随官方默认 |
-| 改后 | 构建**确保发行包不含** `data\hermes-home\config.yaml`：正常流程中该文件从不出现（成品由**未启动**的官方源码组装，`config.yaml` 只会在用户首次启动时生成）；构建脚本以 fail-closed 守卫兜底（组装中段**有意外残留则先删、删不掉即失败**，最终由 Python 契约门禁复核缺席，报告 `UserConfigPackaged=false`）；首次启动时启动器仅在文件**不存在**的情况下，以原子 `CreateNew`/`wx` 方式创建一份最小配置 |
-| 效果 | 全新用户自动获得中文界面；配置已存在的用户**完全不读写、不合并、不替换**，覆盖升级不丢任何设置 |
+| 改后 | 构建确保发行包不含 `data\hermes-home\config.yaml`：正常流程中该文件从不出现（成品由未启动的官方源码组装，`config.yaml` 只会在用户首次启动时生成）；构建脚本以 fail-closed 守卫兜底（组装中段有意外残留则先删、删不掉即失败，最终由 Python 契约门禁复核缺席，报告 `UserConfigPackaged=false`）；首次启动时启动器仅在文件不存在的情况下，以原子 `CreateNew`/`wx` 方式创建一份最小配置 |
+| 效果 | 全新用户自动获得中文界面；配置已存在的用户完全不读写、不合并、不替换，覆盖升级不丢任何设置 |
 
 因此把新 ZIP 解压覆盖到已有 Portable 时，不会用发布包中的默认配置覆盖以下用户设置：
 
@@ -149,7 +149,7 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 
 ## 构建对官方源码的修改
 
-构建器会用 `builder\scripts\Update-Portable.ps1 -Stage Patch` 对 `upstream\` 的官方 Desktop 源码**临时**打补丁：`npm run build`（electron-builder）编译完成后立即用 `-Stage PatchRemove` 还原，源码始终与官方逐字节一致，改动只烙在编译产物（`app\resources\app.asar*`）里。补丁全部是标记包围（`HERMES_PORTABLE_*_BEGIN/END`）、可重复应用、可完整撤销的；撤销后 `git status --porcelain` 必须为空。
+构建器会用 `builder\scripts\Update-Portable.ps1 -Stage Patch` 对 `upstream\` 的官方 Desktop 源码临时打补丁：`npm run build`（electron-builder）编译完成后立即用 `-Stage PatchRemove` 还原，源码始终与官方逐字节一致，改动只烙在编译产物（`app\resources\app.asar*`）里。补丁全部是标记包围（`HERMES_PORTABLE_*_BEGIN/END`）、可重复应用、可完整撤销的；撤销后 `git status --porcelain` 必须为空。
 
 ### 修改清单（7 项）
 
@@ -214,8 +214,8 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 |---|---|
 | 文件 | `apps/shared/src/translucency.ts`（`defaultTranslucencyValues`） |
 | 改前 | 官方按平台默认：macos `light: { intensity: 66, ... }` / `dark: { intensity: 22, ... }`，windows `light: { intensity: 20, ... }` / `dark: { intensity: 5, ... }`——浅色主题整窗淡到约 70% 原生透明度，文字/界面对比度明显下降 |
-| 改后 | **两套平台**（macos + windows）默认全部 `intensity: 0`（补丁标记包围 `HERMES_PORTABLE_TRANSLUCENCY_BEGIN/END`）——默认不透明，用户需要可在桌面设置里自行开启 |
-| 效果 | 浅色主题默认清晰可读；**抗漂移**：按结构匹配任意官方数字、一律改成 0，原值捕获进补丁标记（"was light N / dark M, windows light N / dark M"），`PatchRemove` 精确还原捕获的原值（官方改成什么就还原什么，逐字节一致） |
+| 改后 | 两套平台（macos + windows）默认全部 `intensity: 0`（补丁标记包围 `HERMES_PORTABLE_TRANSLUCENCY_BEGIN/END`）——默认不透明，用户需要可在桌面设置里自行开启 |
+| 效果 | 浅色主题默认清晰可读；抗漂移：按结构匹配任意官方数字、一律改成 0，原值捕获进补丁标记（"was light N / dark M, windows light N / dark M"），`PatchRemove` 精确还原捕获的原值（官方改成什么就还原什么，逐字节一致） |
 | 注意 | `apps/shared` 不在桌面内容哈希范围内（官方 `_compute_desktop_content_hash` 只走 `apps/desktop`），因此该补丁通过完整构建进入产物；部署侧 SyncDesktop 仅当 `apps/desktop` 变化时才强制重建桌面 |
 ### 首次启动播种（启动器，非源码补丁）
 
@@ -223,7 +223,7 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 |---|---|
 | 文件 | `builder\source\Hermes.cs`，编译为根目录 `Hermes.exe`。注意：这不是源码补丁，而是启动器自带的逻辑 |
 | 改前 | 官方启动器不写配置文件：全新安装直接使用内置 `DEFAULT_CONFIG` |
-| 改后 | 发行包不含 `config.yaml`（见"用户配置保护"：构建中段有意外残留则**先删、删不掉即失败**——删除型 fail-closed 守卫；最终契约门禁再复核缺席），首启时 `EnsureFirstRunConfig()` 仅在文件**不存在**时原子创建最小配置：`display.language: zh` |
+| 改后 | 发行包不含 `config.yaml`（见"用户配置保护"：构建中段有意外残留则先删、删不掉即失败——删除型 fail-closed 守卫；最终契约门禁再复核缺席），首启时 `EnsureFirstRunConfig()` 仅在文件不存在时原子创建最小配置：`display.language: zh` |
 | 效果 | 全新用户默认中文界面；配置一旦存在，启动器从此不再读写它，用户设置永不被打扰 |
 
 ### 设计契约
@@ -232,7 +232,7 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 - 随包发布的 `scripts\*.ps1`（含补丁脚本）与 `builder\` 源码 byte-identical；改动后需重新构建同步全部副本，不得只改部署侧
 - 上述修改只存在于构建窗口期；发布 ZIP 内嵌的官方源码保持官方原样
 - 更新流程同样不留补丁：`Update-Portable.ps1 -Stage SyncDesktop` 在桌面同步（原子交换）完成后自动执行 `-Stage PatchRemove` 自清理；`Update.exe` 在官方 `hermes update` 前另有 `-Remove` + `git clean -fd` 兜底，并在官方 `hermes update` 前与 `-UpdatePython` 前各执行一次 `StopPortableProcesses`（按安装根路径停 Hermes/python，释放 cryptography DLL 锁与 venv 目录锁，2026-08-15 修复）。因此无论构建还是更新路径，内嵌源码都以干净状态收尾，绕过 Update.exe 直接运行官方 `hermes update` 也不会触发 "Restore local changes now? [Y/n]" stash 提示
-- 增量构建（2026-08-14）：SyncDesktop 对 Desktop/TUI/Web 分别增量判断——Desktop 用 `data\hermes-home\desktop-build-stamp.json`（构建时在**行尾规范化之后**写入的 `apps/desktop` + 根 package.json/lockfile 内容哈希，判断在补丁之前、以无补丁源码对比，构建机与用户侧算法一致；stamp 若在规范化前写入会因 CRLF/LF 字节差导致哈希错位、增量永远失效）；TUI/Web 直接调用官方 `_tui_need_rebuild` / `_web_ui_build_needed`。某部分源码没动就跳过其重建（Desktop 跳过时含补丁往返与 app 交换），全部没动则整个 SyncDesktop 几乎零成本，更新明显加快
+- 增量构建（2026-08-14）：SyncDesktop 对 Desktop/TUI/Web 分别增量判断——Desktop 用 `data\hermes-home\desktop-build-stamp.json`（构建时在行尾规范化之后写入的 `apps/desktop` + 根 package.json/lockfile 内容哈希，判断在补丁之前、以无补丁源码对比，构建机与用户侧算法一致；stamp 若在规范化前写入会因 CRLF/LF 字节差导致哈希错位、增量永远失效）；TUI/Web 直接调用官方 `_tui_need_rebuild` / `_web_ui_build_needed`。某部分源码没动就跳过其重建（Desktop 跳过时含补丁往返与 app 交换），全部没动则整个 SyncDesktop 几乎零成本，更新明显加快
 
 ## 依赖缓存维护
 
@@ -274,7 +274,7 @@ EmbeddedCheckoutIsOfficialOnly: true
 3. 运行 `Hermes.exe`，首启后 `data\hermes-home\config.yaml` 生成且仅含 `display.language: zh`；再次启动不覆盖已有配置
 4. `runtime\bin\hermes-cli.cmd --version` 等入口正常；`hermes-dashboard.cmd` 启动后 `http://127.0.0.1:9119` 可达（默认端口）
 5. 内嵌官方源码与 upstream 逐字节一致（无补丁残留）；`data\hermes-home` 内嵌 checkout `git status` 干净
-6. 发行 ZIP 内**不含** `data\hermes-home\config.yaml`；`7za t` 完整性 OK；`data\` 只含预置内容
+6. 发行 ZIP 内不含 `data\hermes-home\config.yaml`；`7za t` 完整性 OK；`data\` 只含预置内容
 
 ## 升级策略
 

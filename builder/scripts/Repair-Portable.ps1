@@ -29,13 +29,23 @@ function Remove-TreeBestEffort([string]$Path) {
         Remove-Item $Path -Recurse -Force -ErrorAction Stop
         return
     } catch {
-        $drive = 'V:'
-        try {
-            subst $drive (Split-Path $Path -Parent) | Out-Null
-            cmd.exe /d /c "rd /s /q $drive\$(Split-Path $Path -Leaf)" | Out-Null
-        } finally {
-            subst $drive /d 2>$null | Out-Null
+        # Fixed drive letters are dangerous: if V: is already mapped (network
+        # drive, subst, USB), cmd rd would land on THAT drive's content.
+        # Enumerate free candidates and verify the subst actually took (2026-08-22).
+        $parent = Split-Path $Path -Parent
+        $leaf = Split-Path $Path -Leaf
+        foreach ($letter in 'V','W','T','U','X','Y','Z','R') {
+            if (Test-Path "${letter}:\") { continue }
+            subst "${letter}:" $parent | Out-Null
+            if (-not (Test-Path "${letter}:\")) { continue }
+            try {
+                cmd.exe /d /c "rd /s /q ${letter}:\$leaf" | Out-Null
+            } finally {
+                subst "${letter}:" /d | Out-Null
+            }
+            return
         }
+        throw "Could not remove tree (no free drive letter for subst): $Path"
     }
 }
 
@@ -193,7 +203,16 @@ if ($UpdatePython) {
         Move-Item $PythonBackup $previousPythonDir
         throw "uv python install $OfficialPythonVersion failed with exit code $uvExitCode"
     }
-    $found = ((& $Uv python find $OfficialPythonVersion --managed-python 2>$null) | Select-Object -First 1).Trim()
+    $foundRaw = ((& $Uv python find $OfficialPythonVersion --managed-python 2>$null) | Select-Object -First 1)
+    if (-not $foundRaw) {
+        # No interpreter found: roll the backup back and fail loudly instead of
+        # leaving a half-migrated runtime (2026-08-22: the old code called
+        # .Trim() on $null and silently skipped the rollback).
+        Remove-TreeBestEffort $previousPythonDir
+        Move-Item $PythonBackup $previousPythonDir
+        throw "uv python find $OfficialPythonVersion --managed-python returned nothing after a successful install."
+    }
+    $found = $foundRaw.Trim()
     if (-not (Test-PythonRuntime $found $OfficialPythonVersion)) {
         Remove-TreeBestEffort $previousPythonDir
         Move-Item $PythonBackup $previousPythonDir
@@ -241,7 +260,7 @@ if (-not $healthy) {
         $env:UV_PROJECT_ENVIRONMENT = $Venv
         $env:VIRTUAL_ENV = $Venv
         $env:PYTHONPATH = ''
-        Invoke-NativeChecked 'uv locked dependency sync' { & $Uv sync --project $Repo --extra all --locked --link-mode copy }
+        Invoke-NativeChecked 'uv locked dependency sync' { & $Uv sync --project $Repo --extra all --locked --link-mode copy --no-install-project }
         $oldPythonPath = $env:PYTHONPATH
         try {
             $env:PYTHONPATH = @($Repo, $oldPythonPath) -join ';'

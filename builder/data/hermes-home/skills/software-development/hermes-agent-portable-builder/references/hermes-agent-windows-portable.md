@@ -350,9 +350,9 @@ A full platform test suite may contain upstream POSIX fixture failures on Window
 
 `D:\Hermes-Agent-Portable-Builder\builder` carries these inputs outside the 官方源码. The build installs the non-official skill at `<portable-root>\data\hermes-home\skills\software-development\hermes-agent-portable-builder`; official source remains under `upstream` / `data\hermes-home\hermes-agent` with no Portable commits:
 
-- `templates/hermes-cli.cmd` — pointer-only CLI launcher; never hard-codes a CPython patch directory.
-- `scripts/Update-Portable.ps1` — the merged repair/update helper (single script, `-Stage Repair|Patch|PatchRemove|SyncDesktop`) that parses the embedded 源码的 current `scripts/install.ps1` `$PythonVersion`, passes it to `uv python install/find`, validates major/minor, rebuilds the venv, and updates `current.txt` transactionally; the Patch/PatchRemove stages apply/remove the marker-bounded Desktop source patch (build-time `-RepoPath`, deployed `-PortableRoot`); the SyncDesktop stage rebuilds Desktop/TUI/Web and atomically swaps `app`.
-- `templates/README.txt` — release README template; the public CLI path is `runtime\\bin\\hermes-cli.cmd` and there is no root `Hermes-CLI.exe`.
+- `source/hermes-cli.cmd` — pointer-only CLI launcher; never hard-codes a CPython patch directory.
+- `scripts/Update-Portable.ps1` — the merged patch/update helper (single script, `-Stage Patch|PatchRemove|SyncDesktop|WriteDesktopStamp`): the Patch/PatchRemove stages apply/remove the marker-bounded Desktop source patch (build-time `-RepoPath`, deployed `-PortableRoot`); the SyncDesktop stage rebuilds Desktop/TUI/Web and atomically swaps `app`; `WriteDesktopStamp` records the pristine desktop content hash on the build machine. Python provisioning — parsing the embedded 源码的 current `scripts/install.ps1` `$PythonVersion`, passing it to `uv python install/find`, validating major/minor, rebuilding the venv, and updating `current.txt` transactionally — lives in the standalone `scripts/Repair-Portable.ps1` (`-UpdatePython`), which became the self-contained repair entry when the `Repair` stage was split out of `Update-Portable.ps1` (2026-08-10).
+- `source/README.txt` — release README template; the public CLI path is `runtime\\bin\\hermes-cli.cmd` and there is no root `Hermes-CLI.exe`.
 - `Hermes.ps1` embeds the two release gates as in-script functions (merged into the build script 2026-08-10): `Test-PortablePythonContract` rejects a mismatched Python selector/runtime, hard-coded launcher directory, obsolete root CLI executable, or stale README path, and enforces the MCP import regression probe; `Test-PortableNoEditableInstall` rejects non-relocatable editable metadata (`__editable__*`, `*.egg-link`) and build-root absolute paths in `.pth` files.
 
 At assembly time (Hermes.ps1), render the README metadata placeholders from the actual 源码 and runtime probes, copy these templates into the staged tree, omit `Hermes-CLI.exe`, then run the two contract gates (now in-process):
@@ -536,7 +536,7 @@ identically and verified live.
 
 ### File-by-file edits
 
-#### 1. `builder/templates/Hermes.ps1`
+#### 1. `builder/source/Hermes.ps1`
 
 After the TUI bundle step (`Copy-Item ... 'ui-tui\dist\entry.js' ...`) and BEFORE
 the `package-lock.json` restore guard (one guard then covers BOTH installs):
@@ -570,7 +570,7 @@ contract as the TUI bundle: on failure `Remove-TreeBestEffort $webDistDir` +
 fails explicitly ("Frontend not built"). Include the same `git checkout --
 package-lock.json` restore guard.
 
-#### 3. `builder/templates/hermes-cli.cmd` (core leak fix)
+#### 3. `builder/source/hermes-cli.cmd` (core leak fix)
 
 After the PATH line:
 
@@ -590,7 +590,7 @@ wrapper and inherits the clearing (fine — TUI needs no web dist).
 Add to the `$Checks` inventory hashtable:
 `WebDist = Join-Path $HomeDir 'hermes-agent\hermes_cli\web_dist\index.html'`
 
-#### 5. `builder/templates/README.txt`
+#### 5. `builder/source/README.txt`
 
 故障排查 entry for the web dashboard (mention `hermes-cli.cmd dashboard`,
 http://127.0.0.1:9119, and the IPC-bridge error meaning). The DEPLOYED README
@@ -854,7 +854,7 @@ CSC="$WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 "$CSC" /nologo /target:exe /platform:anycpu /optimize+ `
   "/win32icon:<repo>\apps\desktop\assets\icon.ico" `
   "/out:<target>\Update.exe" /reference:System.Windows.Forms.dll `
-  "<template>\Update.cs"
+  "<source>\Update.cs"
 ```
 
 - `/target:exe` = console app (visible console window); `/target:winexe` = no
@@ -903,7 +903,7 @@ CSC="$WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 
 ### Reference
 
-- `references/update-exe-error-dialog.md` — full session detail: redesigning
+- The `Update.exe error dialog` appendix below (merged into this file from the former `update-exe-error-dialog.md` on 2026-08-10) — full session detail: redesigning
   `Update.exe` failure dialogs (four dialog shapes, child-output capture via
   async event handlers without deadlock, network-error classification,
   diagnostic log), shipping a template change to stage + deployed copies
@@ -1177,7 +1177,7 @@ rather than trusting `ls node_modules`.
   `$_.ExecutablePath.StartsWith($Root, OrdinalIgnoreCase)` where `$Root` has
   no trailing separator ALSO kills a different install whose path merely
   begins with that root (`...-Portable-Beta\`, `...Portable 2\`). Found in
-  BOTH the `Repair` and `SyncDesktop` stages of `Update-Portable.ps1`. Fix —
+  BOTH `Repair-Portable.ps1` (then the `Repair` stage of `Update-Portable.ps1`) and the `SyncDesktop` stage of `Update-Portable.ps1`. Fix —
   match the directory boundary:
   ```powershell
   $rootPrefix = $Root.TrimEnd('\') + '\'
@@ -1483,7 +1483,7 @@ outage, but the dialog gave the user no reason. This reference records the
 dialog redesign, the byte-verification recipe, the propagation workflow, and
 the network-diagnosis ladder.
 
-### 1. Failure dialog redesign (builder\templates\Update.cs)
+### 1. Failure dialog redesign (builder\source\Update.cs)
 
 Four dialog shapes, all title "Hermes Update":
 
@@ -1577,12 +1577,12 @@ Observed: 18 differing bytes total — 2 at 136–137 (PE header area) and 16 at
 
 Propagate to ALL copies in one pass (verified 2026-08-06):
 
-1. Edit `builder\templates\Update.cs`; re-save UTF-8 **with BOM**
+1. Edit `builder\source\Update.cs`; re-save UTF-8 **with BOM**
    (`[IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($true))`).
 2. Compile stage: `/out:D:\Hermes-Agent-Portable-Builder\stage\...\Update.exe`
 3. Compile deployed: `/out:D:\Hermes-Agent-Portable\Update.exe`
    (same csc line incl. `/win32icon:<repo>\apps\desktop\assets\icon.ico`).
-4. Re-render README.txt everywhere from `builder\templates\README.txt` with
+4. Re-render README.txt everywhere from `builder\source\README.txt` with
    the same `{{VAR}}` substitution the build uses — extract the current
    variable values (version/commit/electron/python/node/git/uv) from an
    existing rendered README via regex, then substitute into the template and

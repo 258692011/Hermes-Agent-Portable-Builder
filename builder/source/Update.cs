@@ -95,6 +95,25 @@ internal static class Program
                     "", diagLog);
             }
 
+            // Pre-flight connectivity probe to github.com (the update source)
+            // through the bundled node — same contract as the DeepSeek
+            // updater's network check (2026-08-22): a dead/flaky link fails in
+            // seconds with a clear reason instead of minutes of git retries,
+            // and nothing local is touched yet.
+            string nodeExe = Path.Combine(root, "data", "hermes-home", "node", "node.exe");
+            if (File.Exists(nodeExe))
+            {
+                string netReason = ProbeGitHub(nodeExe, root);
+                if (netReason != null)
+                {
+                    AppendDiag(diagLog, "网络预检", -1, netReason);
+                    MessageBox.Show("无法开始更新（网络问题）。\n\n" + netReason +
+                        "\n\n建议：检查网络或代理后重新运行 Update.exe。更新流程是安全的，重试不会损坏现有安装。",
+                        "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return Finish(1, "network preflight failed: " + netReason);
+                }
+            }
+
             string updater = Path.Combine(root, "scripts", "Update-Portable.ps1");
             string repair = Path.Combine(root, "scripts", "Repair-Portable.ps1");
             string cli = Path.Combine(root, "runtime", "bin", "hermes-cli.cmd");
@@ -287,6 +306,35 @@ internal static class Program
             if (seen >= count) break;
         }
         return sb.ToString();
+    }
+
+    // Pre-flight connectivity probe to github.com (the git update source),
+    // run through the SAME bundled node the updater's tooling uses (a .NET
+    // HttpWebRequest probe misjudges this machine's TLS path — same finding as
+    // the DeepSeek updater, 2026-08-22). Returns null when reachable, else a
+    // user-facing reason. A dead/flaky link fails in ~6s instead of minutes of
+    // git retries.
+    private static string ProbeGitHub(string nodeExe, string workDir)
+    {
+        string script = "const https=require('https');const t=setTimeout(()=>{console.log('PROBE_TIMEOUT');process.exit(0)},6000);https.get('https://github.com/',r=>{clearTimeout(t);console.log('PROBE_OK '+r.statusCode);process.exit(0)}).on('error',e=>{clearTimeout(t);console.log('PROBE_ERR '+(e.code||e.message));process.exit(0)})";
+        string output;
+        RunCaptured(nodeExe, "-e \"" + script + "\"", workDir, out output);
+        string line = null;
+        if (output != null)
+        {
+            foreach (string raw in output.Split('\n'))
+            {
+                string t = raw.Trim();
+                if (t.Length > 0) { line = t; break; }
+            }
+        }
+        if (line != null && line.StartsWith("PROBE_OK")) return null;
+        if (line == "PROBE_TIMEOUT") return "无法连接 github.com：连接超时（网络或代理不稳定）。";
+        string code = line != null && line.StartsWith("PROBE_ERR ") ? line.Substring("PROBE_ERR ".Length) : line;
+        if (code != null && (code.IndexOf("ENOTFOUND") >= 0 || code.IndexOf("getaddrinfo") >= 0)) return "无法连接 github.com：DNS 解析失败。";
+        if (code != null && code.IndexOf("ECONNREFUSED") >= 0) return "无法连接 github.com：连接被拒绝（网络或代理配置问题）。";
+        if (code != null) return "无法连接 github.com：" + code;
+        return "无法连接 github.com（网络探测失败）。";
     }
 
     private static int Fail(string step, int rc, string message, string output, string diagLog)

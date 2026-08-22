@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$BuilderRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [switch]$SkipArchive
 )
@@ -9,12 +9,14 @@ $StageParent = Join-Path $BuilderRoot 'stage'
 $Stage = Join-Path $StageParent 'Hermes-Agent-Portable'
 $Dist = Join-Path $BuilderRoot 'dist'
 $Builder = Join-Path $BuilderRoot 'builder'
-$Templates = Join-Path $Builder 'templates'
+$Source = Join-Path $Builder 'source'
 $Scripts = Join-Path $Builder 'scripts'
-# Offline cache for build-time runtimes (uv / Git / Node / Python). Priority:
-# system install > this cache > network download (downloads are back-filled
-# here so the next build is offline). Populate manually by dropping the same
-# artifact names the installer functions expect, e.g.:
+# Offline cache for build-time runtimes (uv / Git / Node / Python). The build
+# is self-contained: this cache is used first, downloads back-fill it, and the
+# system install is NEVER consulted (2026-08-22 wording fix — the old header
+# said "system install > cache" but Resolve-OrInstall* is explicitly
+# self-contained). Populate manually by dropping the same artifact names the
+# installer functions expect, e.g.:
 #   assets\uv\uv-x86_64-pc-windows-msvc.zip
 #   assets\git\PortableGit-2.55.0.3-64-bit.7z.exe
 #   assets\node\node-v<ver>-win-x64.zip
@@ -39,8 +41,9 @@ $env:ELECTRON_BUILDER_CACHE = Join-Path $RuntimeCache 'electron-builder-cache'
 # any `uv python find <selector> --system` run before Install-ManagedPython
 # resolves to that live runtime and the stage python copy fails. Clearing
 # here is safe: Install-ManagedPython re-sets all three to the stage's own
-# runtime\python before it invokes uv.
-foreach ($leakedVar in 'UV_PYTHON_INSTALL_DIR', 'UV_PYTHON_INSTALL_BIN', 'UV_PYTHON_INSTALL_REGISTRY') {
+# runtime\python before it invokes uv. UV_PYTHON (a direct interpreter pin)
+# is likewise sanitized (2026-08-22).
+foreach ($leakedVar in 'UV_PYTHON_INSTALL_DIR', 'UV_PYTHON_INSTALL_BIN', 'UV_PYTHON_INSTALL_REGISTRY', 'UV_PYTHON') {
     if (Test-Path "Env:$leakedVar") {
         Write-Host "Sanitizing leaked $leakedVar=$([Environment]::GetEnvironmentVariable($leakedVar))"
         Remove-Item "Env:$leakedVar"
@@ -55,9 +58,27 @@ function Copy-Tree([string]$Source, [string]$Destination) {
     if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE): $Source -> $Destination" }
 }
 
+function Ensure-Utf8Bom([string]$Path) {
+    # csc.exe (the .NET Framework compiler) decodes BOM-less sources with the
+    # system ANSI codepage, which mangles the CJK strings in our .cs files on
+    # non-UTF-8 systems. Rewrite the file with a UTF-8 BOM (idempotent) so the
+    # compiled exe always carries intact Chinese, regardless of how the source
+    # was saved or which machine builds it (2026-08-22, same hardening as the
+    # DeepSeek builder; Hermes.cs was shipping BOM-less while Update.cs had one).
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return }
+    $text = [Text.Encoding]::UTF8.GetString($bytes)
+    [IO.File]::WriteAllText($Path, $text, [Text.UTF8Encoding]::new($true))
+    Write-Host "Added UTF-8 BOM to $Path"
+}
+
 function Remove-TreeSafe([string]$Path) {
     # Long-path-safe deletion: plain Remove-Item fails silently on >MAX_PATH
     # trees (e.g. website i18n docs, node_modules), leaving a poisoned stage.
+    # A lingering handle (e.g. a shell whose cwd sits inside the tree) makes
+    # even cmd rd fail, so fall back to subst + rd. If every candidate drive
+    # letter is taken, fail loudly instead of silently leaving the tree behind
+    # (2026-08-22).
     Remove-Item $Path -Recurse -Force -ErrorAction SilentlyContinue
     if (-not (Test-Path $Path)) { return }
     $parent = Split-Path $Path -Parent
@@ -66,6 +87,7 @@ function Remove-TreeSafe([string]$Path) {
     foreach ($letter in $candidates) {
         if (Test-Path "${letter}:\") { continue }
         subst "${letter}:" $parent | Out-Null
+        if (-not (Test-Path "${letter}:\")) { continue } # subst failed (letter raced/taken)
         try {
             cmd.exe /d /c "rd /s /q ${letter}:\$leaf" | Out-Null
         } finally {
@@ -73,6 +95,7 @@ function Remove-TreeSafe([string]$Path) {
         }
         break
     }
+    if (Test-Path $Path) { throw "Could not fully remove (no free drive letter for subst): $Path" }
 }
 
 function Assert-WindowsX64 {
@@ -180,40 +203,48 @@ function Invoke-DownloadWithRetry {
 
 
 function Install-ManagedUv([string]$Root) {
+    # Pin: 0.12.3. The assets
+    # cache holds the UNPACKED tree (same contract as python/git/node,
+    # 2026-08-22): assets\uv\uv-x86_64-pc-windows-msvc\uv.exe. A cache miss
+    # downloads the zip, extracts to temp, back-fills the unpacked dir, and the
+    # temp archive is not kept. A corrupted cache entry is re-downloaded once
+    # (the while-loop retries).
     $uvVersion = '0.12.3'
     $asset = 'uv-x86_64-pc-windows-msvc.zip'
     $bin = Join-Path $Root 'runtime\bin'
     $uv = Join-Path $bin 'uv.exe'
     New-Item -ItemType Directory -Force $bin | Out-Null
-    $zip = Join-Path $env:TEMP $asset
-    $extract = Join-Path $env:TEMP 'hermes-portable-uv-bootstrap'
     $base = "https://github.com/astral-sh/uv/releases/download/$uvVersion"
-    # Prefer the offline cache under assets; otherwise download and back-fill.
-    # No separate SHA256 verification: the archive's own CRC makes any corrupt
-    # download fail at extraction below, and the HTTPS download plus the 3x
-    # retry covers transient failures (decided 2026-08-09: hash check removed).
-    $cacheZip = Join-Path $RuntimeCache "uv\$asset"
-    if (Test-Path $cacheZip) {
-        Write-Host "Using cached uv from assets: $cacheZip"
-        Copy-Item $cacheZip $zip -Force
-    } else {
-        # The download can be flaky; retry up to 3 times.
-        Invoke-DownloadWithRetry -Uri "$base/$asset" -OutFile $zip -Label 'uv'
+    $cacheDir = Join-Path $RuntimeCache "uv\uv-x86_64-pc-windows-msvc"
+    $cachedUv = Join-Path $cacheDir 'uv.exe'
+    $attempt = 0
+    while (-not (Test-Path $cachedUv)) {
+        $attempt++
+        if ($attempt -gt 2) { throw 'Managed uv cache could not be populated after two attempts.' }
+        Write-Host "Downloading uv $uvVersion (cache miss)..."
+        $zip = Join-Path $env:TEMP $asset
+        $extract = Join-Path $env:TEMP 'hermes-portable-uv-bootstrap'
         try {
-            New-Item -ItemType Directory -Force (Split-Path $cacheZip -Parent) | Out-Null
-            Copy-Item $zip $cacheZip -Force
-            Write-Host "Cached uv to assets: $cacheZip"
-        } catch { Write-Host "WARNING: could not cache uv to assets: $_" }
+            # The download can be flaky; retry up to 3 times.
+            Invoke-DownloadWithRetry -Uri "$base/$asset" -OutFile $zip -Label 'uv'
+            Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+            Expand-Archive $zip $extract -Force
+            if (-not (Test-Path (Join-Path $extract 'uv.exe'))) { throw 'Managed uv archive was empty.' }
+            New-Item -ItemType Directory -Force (Split-Path $cacheDir -Parent) | Out-Null
+            Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item $extract $cacheDir -Recurse -Force
+            Write-Host "Back-filled uv cache (unpacked): $cacheDir"
+        } finally {
+            Remove-Item $zip -Force -ErrorAction SilentlyContinue
+            Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
-    try {
-        Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
-        Expand-Archive $zip $extract -Force
-        Copy-Item (Join-Path $extract 'uv.exe') $uv -Force
-        if (-not (Test-Path $uv)) { throw 'Managed uv bootstrap failed.' }
-    } finally {
-        Remove-Item $zip -Force -ErrorAction SilentlyContinue
-        Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    Write-Host "Using cached uv from assets (unpacked): $cacheDir"
+    Copy-Item $cachedUv $uv -Force
+    if (-not (Test-Path $uv)) { throw 'Managed uv bootstrap failed.' }
+    # Version floor assertion: refuse to proceed with a uv older than the pin.
+    $uvVer = (& $uv --version 2>$null)
+    if ($uvVer -notmatch "\b$([regex]::Escape($uvVersion))\b") { throw "Managed uv version check failed: $uvVer (expected $uvVersion)" }
     $uv
 }
 
@@ -258,82 +289,100 @@ function Install-ManagedPython([string]$Root, [string]$Uv, [string]$Selector) {
 function Install-PortableNode([string]$Root, [string]$Major) {
     $arch = 'x64'
     $index = "https://nodejs.org/dist/latest-v$Major.x/"
-    # Prefer a cached Node archive under assets (node-v<major>.*-win-x64.zip);
-    # otherwise resolve the latest version and back-fill the cache.
-    $cacheZip = Get-ChildItem (Join-Path $RuntimeCache 'node') -File -Filter "node-v$Major.*-win-$arch.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($cacheZip) {
-        Write-Host "Using cached Node from assets: $($cacheZip.FullName)"
-        $zip = $cacheZip.FullName
-        $match = [regex]::Match($cacheZip.Name, "node-v$Major\.\d+\.\d+-win-$arch\.zip")
-        if (-not $match.Success) { throw "Cached Node archive name does not match expected pattern: $($cacheZip.Name)" }
-    } else {
-        $page = Invoke-DownloadWithRetry -Uri $index -ReturnContent -Label 'Node.js version index'
-        $match = [regex]::Match($page, "node-v$Major\.\d+\.\d+-win-$arch\.zip")
-        if (-not $match.Success) { throw "Could not resolve portable Node.js $Major for $arch." }
-        $zip = Join-Path $env:TEMP $match.Value
-        # The ~30 MB nodejs.org download can be flaky; retry up to 3 times.
-        Invoke-DownloadWithRetry -Uri ($index + $match.Value) -OutFile $zip -Label 'Node.js'
-        try {
-            New-Item -ItemType Directory -Force (Join-Path $RuntimeCache 'node') | Out-Null
-            Copy-Item $zip (Join-Path $RuntimeCache "node\$($match.Value)") -Force
-            Write-Host "Cached Node to assets: $($match.Value)"
-        } catch { Write-Host "WARNING: could not cache Node to assets: $_" }
+    # Prefer a cached UNPACKED Node tree under assets (node-v<major>.*-win-x64,
+    # same contract as python/git/uv — 2026-08-22); otherwise resolve the
+    # latest version, download the zip, extract, and back-fill the unpacked
+    # dir (the temp archive is not kept). A corrupted cache is re-downloaded
+    # once (the while-loop retries).
+    $nodeCacheDir = Join-Path $RuntimeCache 'node'
+    $cachedNode = Get-ChildItem $nodeCacheDir -Directory -Filter "node-v$Major.*-win-$arch" -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } | Select-Object -First 1
+    if (-not $cachedNode) {
+        $attempt = 0
+        while (-not $cachedNode) {
+            $attempt++
+            if ($attempt -gt 2) { throw 'Portable Node.js cache could not be populated after two attempts.' }
+            Write-Host "Downloading Node.js $Major (cache miss)..."
+            $zip = Join-Path $env:TEMP 'hermes-portable-node.zip'
+            $extract = Join-Path $env:TEMP 'hermes-portable-node-bootstrap'
+            try {
+                $page = Invoke-DownloadWithRetry -Uri $index -ReturnContent -Label 'Node.js version index'
+                $match = [regex]::Match($page, "node-v$Major\.\d+\.\d+-win-$arch\.zip")
+                if (-not $match.Success) { throw "Could not resolve portable Node.js $Major for $arch." }
+                # The ~30 MB nodejs.org download can be flaky; retry up to 3 times.
+                Invoke-DownloadWithRetry -Uri ($index + $match.Value) -OutFile $zip -Label 'Node.js'
+                Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+                Expand-Archive -Path $zip -DestinationPath $extract -Force
+                $source = Get-ChildItem $extract -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } | Select-Object -First 1
+                if (-not $source) { throw 'Portable Node.js archive was empty.' }
+                New-Item -ItemType Directory -Force $nodeCacheDir | Out-Null
+                $destCache = Join-Path $nodeCacheDir $source.Name
+                Remove-Item $destCache -Recurse -Force -ErrorAction SilentlyContinue
+                Copy-Item $source.FullName $destCache -Recurse -Force
+                Write-Host "Back-filled Node cache (unpacked): $destCache"
+                $cachedNode = Get-Item $destCache
+            } finally {
+                Remove-Item $zip -Force -ErrorAction SilentlyContinue
+                Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
-    $extract = Join-Path $env:TEMP 'hermes-portable-node-bootstrap'
-    Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
-    Expand-Archive -Path $zip -DestinationPath $extract -Force
-    $source = Get-ChildItem $extract -Directory | Select-Object -First 1
-    if (-not $source) { throw 'Portable Node.js archive was empty.' }
-    Copy-Tree $source.FullName (Join-Path $Root 'data\hermes-home\node')
-    if (-not $cacheZip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
-    Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Using cached Node from assets (unpacked): $($cachedNode.FullName)"
+    Copy-Tree $cachedNode.FullName (Join-Path $Root 'data\hermes-home\node')
 }
 
 function Install-PortableGit([string]$Root) {
+    # Pin: v2.55.0.windows.3 (kept in sync with the unpacked assets cache and the
+    # hygiene). Keep $gitTag/$gitVer in sync; a build-time floor assertion below
+    # refuses to ship an older git.
     $gitTag = 'v2.55.0.windows.3'
     $gitVer = '2.55.0.3'
     $arch = '64-bit'
     $asset = "PortableGit-$gitVer-$arch.7z.exe"
     $gitRoot = Join-Path $Root 'data\hermes-home\git'
-    # Prefer a cached PortableGit archive under assets; otherwise download and
-    # back-fill the cache. The ~60 MB GitHub release download can be flaky;
-    # retry up to 3 times when we have to download.
-    $cacheArchive = Join-Path $RuntimeCache "git\$asset"
-    if (Test-Path $cacheArchive) {
-        Write-Host "Using cached PortableGit from assets: $cacheArchive"
-        $archive = $cacheArchive
-    } else {
+    # Prefer a cached UNPACKED PortableGit tree under assets
+    # (assets\git\PortableGit\cmd\git.exe, same contract as python/node/uv —
+    # 2026-08-22); otherwise download the archive, extract to temp, and
+    # back-fill the unpacked dir (the temp archive is not kept). A corrupted
+    # cache is re-downloaded once (the while-loop retries). The ~60 MB GitHub
+    # release download can be flaky; Invoke-DownloadWithRetry covers it.
+    $gitCacheDir = Join-Path $RuntimeCache 'git'
+    $unpackedGit = Join-Path $gitCacheDir 'PortableGit'
+    $cachedGitExe = Join-Path $unpackedGit 'cmd\git.exe'
+    $attempt = 0
+    while (-not (Test-Path $cachedGitExe)) {
+        $attempt++
+        if ($attempt -gt 2) { throw 'PortableGit cache could not be populated after two attempts.' }
+        Write-Host "Downloading PortableGit $gitVer (cache miss)..."
         $archive = Join-Path $env:TEMP $asset
-        $downloadArgs = @{
-            Uri = "https://github.com/git-for-windows/git/releases/download/$gitTag/$asset"
-            OutFile = $archive
-            UseBasicParsing = $true
-        }
-        $downloaded = $false
-        for ($attempt = 1; $attempt -le 3 -and -not $downloaded; $attempt++) {
-            try {
-                Invoke-WebRequest @downloadArgs
-                $downloaded = $true
-            }
-            catch {
-                if ($attempt -eq 3) { throw }
-                Write-Host "PortableGit download attempt $attempt failed; retrying in 5s..."
-                Start-Sleep -Seconds 5
-            }
-        }
+        $extractDir = Join-Path $env:TEMP "portablegit-$(Get-Random)"
         try {
-            New-Item -ItemType Directory -Force (Join-Path $RuntimeCache 'git') | Out-Null
-            Copy-Item $archive (Join-Path $RuntimeCache "git\$asset") -Force
-            Write-Host "Cached PortableGit to assets: $asset"
-        } catch { Write-Host "WARNING: could not cache PortableGit to assets: $_" }
+            Invoke-DownloadWithRetry -Uri "https://github.com/git-for-windows/git/releases/download/$gitTag/$asset" -OutFile $archive -Label 'PortableGit'
+            New-Item -ItemType Directory -Force $extractDir | Out-Null
+            $proc = Start-Process -FilePath $archive -ArgumentList "-o`"$extractDir`"", '-y' -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0 -or -not (Test-Path (Join-Path $extractDir 'cmd\git.exe')) -or -not (Test-Path (Join-Path $extractDir 'bin\bash.exe'))) {
+                throw 'PortableGit archive extraction failed.'
+            }
+            New-Item -ItemType Directory -Force $gitCacheDir | Out-Null
+            Remove-Item $unpackedGit -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item $extractDir $unpackedGit -Recurse -Force
+            Write-Host "Back-filled PortableGit cache (unpacked): $unpackedGit"
+        } finally {
+            Remove-Item $archive -Force -ErrorAction SilentlyContinue
+            Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
-    Remove-Item $gitRoot -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force $gitRoot | Out-Null
-    $proc = Start-Process -FilePath $archive -ArgumentList "-o`"$gitRoot`"", '-y' -NoNewWindow -Wait -PassThru
-    if (-not (Test-Path (Join-Path $RuntimeCache "git\$asset"))) { Remove-Item $archive -Force -ErrorAction SilentlyContinue }
-    if ($proc.ExitCode -ne 0 -or -not (Test-Path (Join-Path $gitRoot 'cmd\git.exe')) -or -not (Test-Path (Join-Path $gitRoot 'bin\bash.exe'))) {
+    Write-Host "Using cached PortableGit from assets (unpacked): $unpackedGit"
+    Copy-Item $unpackedGit $gitRoot -Recurse -Force
+    if (-not (Test-Path (Join-Path $gitRoot 'cmd\git.exe')) -or -not (Test-Path (Join-Path $gitRoot 'bin\bash.exe'))) {
         throw 'PortableGit bootstrap failed.'
     }
+    # Version floor assertion: refuse to ship a git older than the pin. The
+    # reported version is "git version 2.55.0.windows.3" — match the full
+    # windows tag ($gitTag minus the leading 'v'), NOT $gitVer ("2.55.0.3"),
+    # which does not occur contiguously in that output (2026-08-22 bugfix).
+    $gitVerOut = (& (Join-Path $gitRoot 'cmd\git.exe') --version 2>$null)
+    $gitTagVer = $gitTag.TrimStart('v')
+    if ($gitVerOut -notmatch [regex]::Escape($gitTagVer)) { throw "PortableGit version check failed: $gitVerOut (expected $gitTagVer)" }
 }
 
 function Install-PortableVenv([string]$Root, [string]$Uv, [string]$Python) {
@@ -392,6 +441,8 @@ function Resolve-OrInstallNode([string]$Root, [string]$Major) {
 }
 
 function Ensure-OfficialNpm([string]$NodeDir) {
+    # KEEP IN SYNC with Update-Portable.ps1 SyncDesktop inline copy (same npm
+    # floor logic, build-time vs deploy-time; 2026-08-22 cross-reference).
     # The official npm floor lives in the repo root package.json engines.npm
     # (e.g. "<11.10.0 || >=11.17.0"). Parse the highest ">=" constraint and
     # upgrade the packaged npm when the bundled version is below that floor.
@@ -730,26 +781,35 @@ New-Item -ItemType Directory -Force $Stage | Out-Null
 Copy-Tree $BuiltApp (Join-Path $Stage 'app')
 New-Item -ItemType File -Force (Join-Path $Stage 'app\portable.marker') | Out-Null
 Copy-Tree (Join-Path $Repo '.git') (Join-Path $Stage 'data\hermes-home\hermes-agent\.git')
-Copy-Tree $Repo (Join-Path $Stage 'data\hermes-home\hermes-agent')
+# Copy the checkout WITHOUT the heavyweight gitignored build dirs (1GB+
+# node_modules, electron release/dist) — they are not shipped and the staged
+# checkout is git-cleaned later anyway (2026-08-22: /XD avoids copying then
+# deleting them). The Remove-TreeSafe calls below stay as a safety net.
+robocopy $Repo (Join-Path $Stage 'data\hermes-home\hermes-agent') /E /XD node_modules apps\desktop\release apps\desktop\dist /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE): $Repo -> staged checkout" }
 Remove-TreeSafe (Join-Path $Stage 'data\hermes-home\hermes-agent\node_modules')
 Remove-TreeSafe (Join-Path $Stage 'data\hermes-home\hermes-agent\apps\desktop\release')
 Remove-TreeSafe (Join-Path $Stage 'data\hermes-home\hermes-agent\apps\desktop\dist')
-Write-Host 'Preparing a fresh Portable runtime directly in build (system-first, download missing components)...'
+Write-Host 'Preparing a fresh Portable runtime directly in build (own assets cache first, download missing components)...'
 $uv = Resolve-OrInstallUv $Stage
+# Upstream managed_uv.py expects $HERMES_HOME\bin\uv.exe for in-app uv
+# self-updates; mirror the runtime\bin copy there so that path resolves
+# (2026-08-22; Repair-Portable.ps1 prefers it first).
+$hermesHomeBin = Join-Path $Stage 'data\hermes-home\bin'
+New-Item -ItemType Directory -Force $hermesHomeBin | Out-Null
+Copy-Item (Join-Path $Stage 'runtime\bin\uv.exe') (Join-Path $hermesHomeBin 'uv.exe') -Force
 $pythonInfo = Resolve-OrInstallPython $Stage $uv $selector
 $resolvedPython = $pythonInfo.Python
-$runtimeName = $pythonInfo.RuntimeName
-$resolvedDir = Split-Path $resolvedPython -Parent
 $pythonVersion = (Invoke-NativeChecked 'Resolve python version' { & $resolvedPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" }).Trim()
 Resolve-OrInstallNode $Stage $nodeSelector
 Ensure-OfficialNpm (Join-Path $Stage 'data\hermes-home\node')
 Resolve-OrInstallGit $Stage
 Install-PortableVenv $Stage $uv $resolvedPython
 New-Item -ItemType Directory -Force (Join-Path $Stage 'data\electron-user-data') | Out-Null
-Copy-Item (Join-Path $Templates 'hermes-cli.cmd') (Join-Path $Stage 'runtime\bin\hermes-cli.cmd') -Force
-Copy-Item (Join-Path $Templates 'hermes-tui.cmd') (Join-Path $Stage 'runtime\bin\hermes-tui.cmd') -Force
-Copy-Item (Join-Path $Templates 'hermes-dashboard.cmd') (Join-Path $Stage 'runtime\bin\hermes-dashboard.cmd') -Force
-Copy-Tree (Join-Path $Templates 'python-bootstrap') (Join-Path $Stage 'runtime\python-bootstrap')
+Copy-Item (Join-Path $Source 'hermes-cli.cmd') (Join-Path $Stage 'runtime\bin\hermes-cli.cmd') -Force
+Copy-Item (Join-Path $Source 'hermes-tui.cmd') (Join-Path $Stage 'runtime\bin\hermes-tui.cmd') -Force
+Copy-Item (Join-Path $Source 'hermes-dashboard.cmd') (Join-Path $Stage 'runtime\bin\hermes-dashboard.cmd') -Force
+Copy-Tree (Join-Path $Source 'python-bootstrap') (Join-Path $Stage 'runtime\python-bootstrap')
 New-Item -ItemType Directory -Force (Join-Path $Stage 'scripts') | Out-Null
 Copy-Item (Join-Path $Scripts 'Update-Portable.ps1') (Join-Path $Stage 'scripts\Update-Portable.ps1') -Force
 Copy-Item (Join-Path $Scripts 'Repair-Portable.ps1') (Join-Path $Stage 'scripts\Repair-Portable.ps1') -Force
@@ -765,8 +825,10 @@ if (Test-Path $ConfigPath) { throw "Release must not contain user config: $Confi
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $officialIcon = Join-Path $Repo 'apps\desktop\assets\icon.ico'
 if (-not (Test-Path $officialIcon)) { throw "Official Hermes Desktop icon is missing: $officialIcon" }
-Invoke-NativeChecked 'Hermes launcher compilation' { & $csc /nologo /target:winexe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Hermes.exe" /reference:System.Windows.Forms.dll (Join-Path $Templates 'Hermes.cs') }
-Invoke-NativeChecked 'Update launcher compilation' { & $csc /nologo /target:exe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Update.exe" /reference:System.Windows.Forms.dll (Join-Path $Templates 'Update.cs') }
+Ensure-Utf8Bom (Join-Path $Source 'Hermes.cs')
+Ensure-Utf8Bom (Join-Path $Source 'Update.cs')
+Invoke-NativeChecked 'Hermes launcher compilation' { & $csc /nologo /target:winexe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Hermes.exe" /reference:System.Windows.Forms.dll (Join-Path $Source 'Hermes.cs') }
+Invoke-NativeChecked 'Update launcher compilation' { & $csc /nologo /target:exe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Update.exe" /reference:System.Windows.Forms.dll (Join-Path $Source 'Update.cs') }
 
 $package = Get-Content (Join-Path $Repo 'pyproject.toml') -Raw
 $hermesVersion = [regex]::Match($package, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
@@ -782,11 +844,13 @@ $electronVersion = (Get-Content $electronPkg -Raw | ConvertFrom-Json).version
 $nodeVersion = (Invoke-NativeChecked 'Resolve node version' { & (Join-Path $Stage 'data\hermes-home\node\node.exe') --version }).Trim().TrimStart('v')
 $gitVersion = ((Invoke-NativeChecked 'Resolve git version' { & (Join-Path $Stage 'data\hermes-home\git\cmd\git.exe') --version }) -replace '^git version ','').Trim()
 $uvVersion = ((Invoke-NativeChecked 'Resolve uv version' { & (Join-Path $Stage 'runtime\bin\uv.exe') --version }) -replace '^uv ','').Split(' ')[0]
-$readme = [IO.File]::ReadAllText((Join-Path $Templates 'README.txt'), [Text.Encoding]::UTF8)
+$readme = [IO.File]::ReadAllText((Join-Path $Source 'README.txt'), [Text.Encoding]::UTF8)
 $readme = $readme.Replace('{{HERMES_VERSION}}', $hermesVersion).Replace('{{SOURCE_COMMIT}}', $commit).Replace('{{ELECTRON_VERSION}}', $electronVersion).Replace('{{PYTHON_VERSION}}', $pythonVersion).Replace('{{NODE_VERSION}}', $nodeVersion).Replace('{{GIT_VERSION}}', $gitVersion).Replace('{{UV_VERSION}}', $uvVersion)
 [IO.File]::WriteAllText((Join-Path $Stage 'README.txt'), $readme, [Text.UTF8Encoding]::new($false))
 
 $Checkout = Join-Path $Stage 'data\hermes-home\hermes-agent'
+# Defensive restore: if any earlier step ever changed the staged checkout's
+# origin URL, put the official one back (currently a no-op — kept as a guard).
 $oldOrigin = (Invoke-NativeChecked 'Resolve staged origin' -AllowFailure { (& git.exe -C $Checkout remote get-url origin 2>$null) | Select-Object -First 1 })
 if ($oldOrigin) { Invoke-NativeChecked 'Restore staged origin' { & git.exe -C $Checkout remote set-url origin $oldOrigin.Trim() } }
 Invoke-NativeChecked 'Staged git config longpaths' { & git.exe -C $Checkout config core.longpaths true }

@@ -18,6 +18,8 @@ $Checks = [ordered]@{
   Desktop = Join-Path $Root 'app\Hermes.exe'
   PortableMarker = Join-Path $Root 'app\portable.marker'
   Hermes = Join-Path $Root 'runtime\bin\hermes-cli.cmd'
+  TuiCli = Join-Path $Root 'runtime\bin\hermes-tui.cmd'
+  DashboardCli = Join-Path $Root 'runtime\bin\hermes-dashboard.cmd'
   Python = Join-Path $Root "runtime\python\$PythonRuntimeName\python.exe"
   Node = Join-Path $HomeDir 'node\node.exe'
   Npm = Join-Path $HomeDir 'node\npm.cmd'
@@ -31,6 +33,7 @@ $Checks = [ordered]@{
   Bash = Join-Path $HomeDir 'git\bin\bash.exe'
   Uv = Join-Path $Root 'runtime\bin\uv.exe'
   WebDist = Join-Path $HomeDir 'hermes-agent\hermes_cli\web_dist\index.html'
+  TuiDist = Join-Path $HomeDir 'hermes-agent\hermes_cli\tui_dist\entry.js'
 }
 
 foreach ($legacyName in @('Hermes-Desktop.exe', 'Update-Hermes.exe')) {

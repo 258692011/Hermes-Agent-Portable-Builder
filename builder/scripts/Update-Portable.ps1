@@ -19,13 +19,23 @@ function Remove-TreeBestEffort([string]$Path) {
         Remove-Item $Path -Recurse -Force -ErrorAction Stop
         return
     } catch {
-        $drive = 'W:'
-        try {
-            subst $drive (Split-Path $Path -Parent) | Out-Null
-            cmd.exe /d /c "rd /s /q $drive\$(Split-Path $Path -Leaf)" | Out-Null
-        } finally {
-            subst $drive /d 2>$null | Out-Null
+        # Fixed drive letters are dangerous: if W: is already mapped (network
+        # drive, subst, USB), cmd rd would land on THAT drive's content.
+        # Enumerate free candidates and verify the subst actually took (2026-08-22).
+        $parent = Split-Path $Path -Parent
+        $leaf = Split-Path $Path -Leaf
+        foreach ($letter in 'W','V','T','U','X','Y','Z','R') {
+            if (Test-Path "${letter}:\") { continue }
+            subst "${letter}:" $parent | Out-Null
+            if (-not (Test-Path "${letter}:\")) { continue }
+            try {
+                cmd.exe /d /c "rd /s /q ${letter}:\$leaf" | Out-Null
+            } finally {
+                subst "${letter}:" /d | Out-Null
+            }
+            return
         }
+        throw "Could not remove tree (no free drive letter for subst): $Path"
     }
 }
 
@@ -117,7 +127,8 @@ function Apply-PortablePatch {
     $Main = Join-Path $patchRepo 'apps\desktop\electron\main.ts'
     $Zoom = Join-Path $patchRepo 'apps\desktop\electron\zoom.ts'
     $ZoomTest = Join-Path $patchRepo 'apps\desktop\electron\zoom.test.ts'
-    if (-not (Test-Path $Main) -or -not (Test-Path $Zoom) -or -not (Test-Path $ZoomTest)) {
+    $Translucency = Join-Path $patchRepo 'apps\shared\src\translucency.ts'
+    if (-not (Test-Path $Main) -or -not (Test-Path $Zoom) -or -not (Test-Path $ZoomTest) -or -not (Test-Path $Translucency)) {
         if ($Remove) {
             Write-Host 'Portable Desktop source patch is already absent (Desktop source not present).'
             exit 0
@@ -134,6 +145,29 @@ function Apply-PortablePatch {
     $backendPatch2End = '// HERMES_PORTABLE_BACKEND_2_END'
     $backendNeedle1 = '  const command = IS_WINDOWS && fileExists(venvPython) ? venvPython : python'
     $backendNeedle2 = '  const command = fileExists(venvPython) ? venvPython : findSystemPython()'
+    # 7th portable patch: default translucency OFF, DRIFT-PROOF. The official
+    # light (fade:1 header) / dark (fade:0 titlebar) default lines in
+    # apps/shared/src/translucency.ts wash out the light-theme UI
+    # (NousResearch/hermes-agent#92200). They are matched by STRUCTURE with ANY
+    # intensity numbers (upstream may change them — the intent is always
+    # "default translucency OFF"), and the ORIGINAL numbers are captured inside
+    # the marker block ("was light N / dark M") so PatchRemove can restore them
+    # exactly even after upstream drifts. NOTE: apps/shared is OUTSIDE the
+    # desktop content hash scope (apps/desktop only, matching the official
+    # _compute_desktop_content_hash), so this patch ships via full builds; a
+    # deployed SyncDesktop rebuild is only forced when apps/desktop changes.
+    $translucencyBegin = '// HERMES_PORTABLE_TRANSLUCENCY_BEGIN'
+    $translucencyEnd = '// HERMES_PORTABLE_TRANSLUCENCY_END'
+    # Light line: <indent>light: { intensity: <n>, fade: 1, material: 'header', scope: 'window' },
+    # Dark  line: <indent>dark: { intensity: <n>, fade: 0, material: 'titlebar', scope: 'window' }
+    # Groups: 1=indentL+prefix, 2=lightNum, 3=lightTail+\n, 4=indentD+prefix, 5=darkNum, 6=darkTail
+    $translucencyPattern = '(?m)^(\s*light: \{ intensity: )(\d+)(, fade: 1, material: ''header'', scope: ''window'' \},\n)(\s*dark: \{ intensity: )(\d+)(, fade: 0, material: ''titlebar'', scope: ''window'' \})$'
+    # Full marker block for restore; captures the original numbers from the
+    # comment plus the line pieces to rebuild the official two lines exactly.
+    # Groups: 1=lightOrig, 2=darkOrig, 3=indentL+prefix, 4=lightZero,
+    #         5=lightTail("},"), 6=newline, 7=indentD+prefix, 8=darkZero,
+    #         9=darkTail.
+    $translucencyRestorePattern = '(?s)// HERMES_PORTABLE_TRANSLUCENCY_BEGIN.*?was light (\d+) / dark (\d+)[^\n]*\n(\s*light: \{ intensity: )(\d+)(, fade: 1, material: ''header'', scope: ''window'' \},)(\n)(\s*dark: \{ intensity: )(\d+)(, fade: 0, material: ''titlebar'', scope: ''window'' \})\s*// HERMES_PORTABLE_TRANSLUCENCY_END'
     $backendBlock1 = @"
 $backendPatch1Begin
 // Portable: the packaged venv trampoline records the builder's build-tree
@@ -176,6 +210,9 @@ $backendPatch2End
     $zoomTestInfo = Read-NormalizedText $ZoomTest
     $zoomTestText = $zoomTestInfo.Text
     $zoomTestEol = $zoomTestInfo.Eol
+    $translucencyInfo = Read-NormalizedText $Translucency
+    $translucencyText = $translucencyInfo.Text
+    $translucencyEol = $translucencyInfo.Eol
     $officialZoom = 'Math.log(0.9) / Math.log(ZOOM_FACTOR_BASE)'
     $portableZoom = 'Math.log(1.0) / Math.log(ZOOM_FACTOR_BASE)'
     $officialZoomRestore = "win.webContents.on('did-finish-load', () => restorePersistedZoomLevel(win))"
@@ -254,15 +291,33 @@ test('default zoom matches the Appearance 90% preset', () => {
 })
 '@.Trim()
         if ($ownsZoomPatch) {
+            $before = $zoomTestText
             $zoomTestText = $zoomTestText.Replace($portableTestBlock, $officialTestBlock)
+            # Fail loudly if upstream changed the test block: a silent no-op
+            # would ship zoom.ts at 100% while the test still asserts 90%
+            # (2026-08-22).
+            if ($zoomTestText -eq $before -or $zoomTestText.Contains($portableTestBlock)) {
+                throw 'Portable zoom.test.ts block was not found — upstream changed the test; review before patching.'
+            }
             Write-TextWithOriginalEol $ZoomTest $zoomTestText $zoomTestEol
+        }
+        # Restore the official translucency defaults before an official update,
+        # using the ORIGINAL numbers captured in the marker block — drift-proof
+        # against upstream changing the values (2026-08-22).
+        if ($translucencyText.Contains($translucencyBegin)) {
+            $rm = [regex]::Match($translucencyText, $translucencyRestorePattern)
+            if (-not $rm.Success) { throw 'Portable translucency default restore failed — marker block structure changed.' }
+            $official = $rm.Groups[3].Value + $rm.Groups[1].Value + $rm.Groups[5].Value +
+                        $rm.Groups[6].Value + $rm.Groups[7].Value + $rm.Groups[2].Value + $rm.Groups[9].Value
+            $translucencyText = $translucencyText.Substring(0, $rm.Index) + $official + $translucencyText.Substring($rm.Index + $rm.Length)
+            Write-TextWithOriginalEol $Translucency $translucencyText $translucencyEol
         }
         Refresh-PortableGitIndex -Skip:(-not $PortableRoot)
         Write-Host "Portable Desktop source patch removed before official update: $Main"
         exit 0
     }
 
-    if ($text.Contains($startMarker) -and $text.Contains($portableZoomRestore) -and $zoomText.Contains($portableZoom)) {
+    if ($text.Contains($startMarker) -and $text.Contains($portableZoomRestore) -and $zoomText.Contains($portableZoom) -and $translucencyText.Contains($translucencyBegin)) {
         Write-Host 'Portable Desktop source patch already applied.'
         exit 0
     }
@@ -381,7 +436,24 @@ test('default zoom matches the Portable Appearance 100% preset', () => {
 '@.Trim()
     $zoomTestText = $zoomTestText.Replace($officialTestBlock, $portableTestBlock)
     Write-TextWithOriginalEol $ZoomTest $zoomTestText $zoomTestEol
-    Write-Host "Portable Desktop source patch applied (default zoom 100%): $Main"
+    # 7th patch: translucency defaults -> 0/0, drift-proof — matched by
+    # structure with ANY official numbers, originals captured in the marker
+    # block for exact restore (2026-08-22).
+    if (-not $translucencyText.Contains($translucencyBegin)) {
+        $st = @{ matched = $false }
+        $translucencyText = [regex]::Replace($translucencyText, $translucencyPattern, {
+            param($m)
+            $st.matched = $true
+            return $translucencyBegin + "`n" +
+                "// Portable: default translucency OFF (was light " + $m.Groups[2].Value + " / dark " + $m.Groups[5].Value + ").`n" +
+                $m.Groups[1].Value + '0' + $m.Groups[3].Value +
+                $m.Groups[4].Value + '0' + $m.Groups[6].Value + "`n" +
+                $translucencyEnd
+        })
+        if (-not $st.matched) { throw 'Portable translucency default block was not found (structure changed).' }
+        Write-TextWithOriginalEol $Translucency $translucencyText $translucencyEol
+    }
+    Write-Host "Portable Desktop source patch applied (default zoom 100%, translucency off): $Main"
 }
 
 # =====================================================================
@@ -478,7 +550,7 @@ function Sync-PortableDesktop {
         } else {
             Write-Host 'Desktop source unchanged since the last build; skipping electron-builder rebuild.'
         }
-        # npm version follows the official floor (repo package.json engines.npm);
+        # KEEP IN SYNC with Hermes.ps1 Ensure-OfficialNpm (same npm floor logic,\n        # deploy-time vs build-time; 2026-08-22 cross-reference).\n        # npm version follows the official floor (repo package.json engines.npm);
         # the node distribution's bundled npm does not track it. Parse the highest
         # ">=" constraint and upgrade when the packaged npm is below that floor.
         $npmCmd = Join-Path $HermesHome 'node\npm.cmd'
@@ -493,26 +565,31 @@ function Sync-PortableDesktop {
                     if ($v -gt $best) { $best = $v }
                 }
                 if ($best -ne [version]'0.0.0') {
-                    $cur = [version]((& $npmCmd --version 2>$null).Trim())
-                    if ($cur -lt $best) {
-                        Write-Host "Upgrading packaged npm to match official requirement ($npmReq, floor >=$best)..."
-                        # Read the bundled corepack version BEFORE the upgrade:
-                        # the npm install --prefix below prunes
-                        # node_modules\corepack (verified 2026-08-14, leaving
-                        # dead shims that fail with MODULE_NOT_FOUND), so
-                        # afterwards reinstall exactly the version the official
-                        # Node zip bundled — the version follows the Node
-                        # archive automatically, no hardcoding.
-                        $nodeDir = Split-Path $npmCmd -Parent
-                        $corepackVersion = $null
-                        $cpPkg = Join-Path $nodeDir 'node_modules\corepack\package.json'
-                        if (Test-Path $cpPkg) { try { $corepackVersion = (Get-Content $cpPkg -Raw | ConvertFrom-Json).version } catch { } }
-                        Invoke-NativeChecked "Packaged npm upgrade to npm@$($best.Major)" { & $npmCmd install --prefix $nodeDir "npm@$($best.Major)" --no-fund --no-audit --progress=false }
-                        if ($corepackVersion -and -not (Test-Path (Join-Path $nodeDir 'node_modules\corepack\dist\corepack.js'))) {
-                            Write-Host "Packaged corepack was pruned by the npm upgrade; reinstalling corepack@$corepackVersion (bundled version)..."
-                            Invoke-NativeChecked "Packaged corepack reinstall" { & $npmCmd install --prefix $nodeDir "corepack@$corepackVersion" --no-fund --no-audit --progress=false }
+                    $npmOut = (& $npmCmd --version 2>$null)
+                    if (-not $npmOut) {
+                        Write-Host "WARNING: packaged npm --version returned nothing; skipping npm floor check (2026-08-22 null-guard)."
+                    } else {
+                        $cur = [version]$npmOut.Trim()
+                        if ($cur -lt $best) {
+                            Write-Host "Upgrading packaged npm to match official requirement ($npmReq, floor >=$best)..."
+                            # Read the bundled corepack version BEFORE the upgrade:
+                            # the npm install --prefix below prunes
+                            # node_modules\corepack (verified 2026-08-14, leaving
+                            # dead shims that fail with MODULE_NOT_FOUND), so
+                            # afterwards reinstall exactly the version the official
+                            # Node zip bundled — the version follows the Node
+                            # archive automatically, no hardcoding.
+                            $nodeDir = Split-Path $npmCmd -Parent
+                            $corepackVersion = $null
+                            $cpPkg = Join-Path $nodeDir 'node_modules\corepack\package.json'
+                            if (Test-Path $cpPkg) { try { $corepackVersion = (Get-Content $cpPkg -Raw | ConvertFrom-Json).version } catch { } }
+                            Invoke-NativeChecked "Packaged npm upgrade to npm@$($best.Major)" { & $npmCmd install --prefix $nodeDir "npm@$($best.Major)" --no-fund --no-audit --progress=false }
+                            if ($corepackVersion -and -not (Test-Path (Join-Path $nodeDir 'node_modules\corepack\dist\corepack.js'))) {
+                                Write-Host "Packaged corepack was pruned by the npm upgrade; reinstalling corepack@$corepackVersion (bundled version)..."
+                                Invoke-NativeChecked "Packaged corepack reinstall" { & $npmCmd install --prefix $nodeDir "corepack@$corepackVersion" --no-fund --no-audit --progress=false }
+                            }
+                            Write-Host "Packaged npm now $((& $npmCmd --version 2>$null).Trim()) (official requires $npmReq)."
                         }
-                        Write-Host "Packaged npm now $((& $npmCmd --version 2>$null).Trim()) (official requires $npmReq)."
                     }
                 }
             }
@@ -529,13 +606,17 @@ function Sync-PortableDesktop {
         $tuiNeeded = $true
         try {
             $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
-            $tuiNeeded = ((& $Python -c "from pathlib import Path; from hermes_cli.main import _tui_need_rebuild; print(_tui_need_rebuild(Path(r'$Repo\ui-tui')))" 2>$null | Select-Object -Last 1) -eq 'True')
+            $tuiProbe = (& $Python -c "from pathlib import Path; from hermes_cli.main import _tui_need_rebuild; print(_tui_need_rebuild(Path(r'$Repo\ui-tui')))" 2>$null | Select-Object -Last 1)
+            # A non-zero native exit is NOT a PS exception under 5.1 — check
+            # $LASTEXITCODE so a broken venv rebuilds instead of silently
+            # shipping a stale/missing bundle (2026-08-22).
+            if ($LASTEXITCODE -ne 0) { $tuiNeeded = $true } else { $tuiNeeded = ($tuiProbe -eq 'True') }
         } catch { $tuiNeeded = $true }
         if ($tuiNeeded) {
             try {
                 Push-Location $Repo
                 try {
-                    Invoke-NativeChecked 'TUI workspace install' { & npm.cmd install --workspace ui-tui --include=dev --silent --no-fund --no-audit --progress=false }
+                    Invoke-NativeChecked 'TUI workspace install' { & npm.cmd install --workspace ui-tui --include=dev --silent --no-fund --no-audit --progress=false --prefer-offline }
                     Push-Location (Join-Path $Repo 'ui-tui')
                     try {
                         Invoke-NativeChecked 'TUI bundle build' { & npm.cmd run build }
@@ -576,13 +657,15 @@ function Sync-PortableDesktop {
     try {
         $env:HERMES_HOME = $HermesHome
         $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
-        $webNeeded = ((& $Python -c "from pathlib import Path; from hermes_cli.main import _web_ui_build_needed; print(_web_ui_build_needed(Path(r'$Repo\web')))" 2>$null | Select-Object -Last 1) -eq 'True')
+        $webProbe = (& $Python -c "from pathlib import Path; from hermes_cli.main import _web_ui_build_needed; print(_web_ui_build_needed(Path(r'$Repo\web')))" 2>$null | Select-Object -Last 1)
+        # Non-zero native exit = probe failed -> rebuild (conservative, 2026-08-22).
+        if ($LASTEXITCODE -ne 0) { $webNeeded = $true } else { $webNeeded = ($webProbe -eq 'True') }
     } catch { $webNeeded = $true }
     if ($webNeeded) {
         try {
             Push-Location $Repo
             try {
-                Invoke-NativeChecked 'Web workspace install' { & npm.cmd install --workspace web --include=dev --silent --no-fund --no-audit --progress=false }
+                Invoke-NativeChecked 'Web workspace install' { & npm.cmd install --workspace web --include=dev --silent --no-fund --no-audit --progress=false --prefer-offline }
                 Push-Location (Join-Path $Repo 'web')
                 try {
                     Invoke-NativeChecked 'Web bundle build' { & npm.cmd run build }

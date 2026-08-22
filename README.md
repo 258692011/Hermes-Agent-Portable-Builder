@@ -1,96 +1,134 @@
 # Hermes Agent Portable Builder
 
-此目录是本机 Portable 构建系统，**不是**官方 Git 仓库的一部分；官方源码只存放在 `upstream\` 子目录中
+此目录是本机 Portable 构建系统，**不是**官方 Git 仓库的一部分；官方源码只存放在 `upstream\` 子目录中。
 
-目录职责：
+本构建器将 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 打包成免安装、可移动的 Windows x64 便携版：内嵌 Python + venv 依赖、Node.js、PortableGit、Electron 桌面端，用户数据通过 `HERMES_HOME` 等重定向到包内 `data\hermes-home\`，整包可复制、移动。
 
-- `upstream\`：只保存 NousResearch 官方 Hermes 源码，可直接同步或重置到 `origin/main`
-- `builder\`：本地构建器实现，包括 scripts、templates 和 assets；只在构建机使用
-- `builder\data\`：Builder 管理的成品 data 种子源码（`hermes-home\memories\`、`hermes-home\skills\` 等）；目录结构镜像成品中的 `data\`
-- `stage\`：组装后的未压缩 Portable 目录
-- `dist\`：可选的最终 ZIP
+## 目录职责
 
-### 构建机要求
+```
+Hermes-Agent-Portable-Builder\
+├── README.md                        # 本说明文档（构建器用法）
+├── builder\                         # 本地构建器实现；只在构建机使用
+│   ├── source\                      # 构建脚本（入口 Hermes.ps1）、启动器/更新器 C# 源码、README 模板、入口脚本
+│   ├── scripts\                     # 随包发布的维护脚本（Update-Portable.ps1 / Repair-Portable.ps1 / Verify-Portable.ps1），与成品 scripts\ byte-identical
+│   ├── assets\                      # 离线缓存（7zip、git、node、uv、python、npm-cache、electron-cache、electron-builder-cache），缺失时联网下载并回填
+│   ├── data\                        # 随包预置内容，构建时复制进成品 data\（hermes-home\memories、hermes-home\skills 等）
+│   └── logs\                        # 构建日志
+├── upstream\                        # 只读镜像：NousResearch 官方 Hermes 源码；可同步/重置到 origin/main
+├── stage\                           # 组装后的未压缩 Portable 目录（Hermes-Agent-Portable\）
+└── dist\                            # 最终 ZIP（Hermes-Agent-Portable-<版本>-win-x64-<时间戳>.zip）
+```
+
+## 构建机要求
 
 当前只支持 **Windows 10/11 x64**。构建机需要：
 
 | 软件 | 版本要求 | 是否必须预装 | 说明 |
 |---|---|---:|---|
 | Windows PowerShell | 5.1（Windows 自带） | 是 | 构建入口及维护脚本运行环境 |
-| Git for Windows | 当前固定 **2.55.0.3**（`v2.55.0.windows.3`，构建脚本硬编码） | 否 | 构建器**不读取系统**；从 `builder\assets\git\` 缓存取 PortableGit 进成品，缓存缺失才下载（下载后回填 assets 缓存） |
-| Node.js + npm | 上游选择器 **22**；当前缓存 **v22.23.2**（npm 11.19.0） | 是（编译用） | 编译 Desktop、TUI 和运行 electron-builder 需要构建机上的 npm；打包进成品的 Node 运行时**不读取系统**，从 `builder\assets\node\` 缓存取，缺失才从 nodejs.org 下载；成品 Node 同时含官方捆绑的 corepack（版本随官方 Node zip 自动跟随）（下载后回填 assets 缓存） |
-| uv | 构建器用固定 **0.12.3** | 否 | 构建器**不读取系统**；从 `builder\assets\uv\` 缓存取，缺失才下载（下载后回填 assets 缓存） |
+| Git for Windows | 当前固定 **2.55.0.3**（`v2.55.0.windows.3`，构建脚本硬编码） | 否 | 构建器**不读取系统**；从 `builder\assets\git\PortableGit\`（解压后的目录缓存）取进成品，缓存缺失才下载、解压并回填 |
+| Node.js + npm | 上游选择器 **22**；当前缓存 **v22.23.2**（npm 11.19.0） | 是（编译用） | 编译 Desktop、TUI 和运行 electron-builder 需要构建机上的 npm；打包进成品的 Node 运行时**不读取系统**，从 `builder\assets\node\node-v22.23.2-win-x64\`（解压后的目录缓存）取，缺失才从 nodejs.org 下载、解压并回填 |
+| uv | 构建器用固定 **0.12.3** | 否 | 构建器**不读取系统**；从 `builder\assets\uv\uv-x86_64-pc-windows-msvc\`（解压后的目录缓存）取，缺失才下载、解压并回填 |
 | Python | 当前上游选择器为 **3.11**；patch 版本不锁定 | 否 | 构建器**不读取系统**；从 `builder\assets\python\` 的解压目录取，缺失才由 uv 安装（下载后回填 assets 缓存） |
 | .NET Framework C# 编译器 | v4.0（Windows 10/11 自带） | 是（系统组件） | 使用 `Framework64\v4.0.30319\csc.exe` 编译 `Hermes.exe` 和 `Update.exe` |
 | 7za.exe（7-Zip 命令行版） | 随仓库内置 `builder\assets\7zip\7za.exe`（当前 26.02） | 否 | 通常随仓库自带；缺失时自动从 7-Zip 官网下载 extra 包恢复（下载后回填 assets 缓存） |
 
-版本规则：Git 固定 2.55.0.3（构建脚本硬编码，升级需改 `$gitTag`/`$gitVer`）；Node 跟随上游选择器主版本 22，
-缓存里的具体 patch 版本随上游 `NodeVersion` 更新而变；uv 固定 0.12.3；Python 跟随上游选择器 3.11。上游以后修改 `PythonVersion`、`NodeVersion` 或
-`package.json` 的 `engines.npm` 时，构建器会读取新要求并自动适配（包内 npm 不足时自动升级；
-npm 升级命令会清掉官方捆绑的 corepack，因此脚本在升级前读取官方捆绑的 corepack 版本、升级后按该版本重装（版本始终跟随 Node zip，无硬编码）），
-此表也应随发布流程同步更新。用户端更新脚本（`Update-Portable.ps1 -Stage SyncDesktop`）同样会在 TUI 重建前
-检查并升级包内 npm（同样先读版本后重装 corepack），因此官方提升 npm 要求不会卡住老部署的更新。
-`Verify-Portable.ps1` 对成品 Node 的 corepack 本体与 shim 设有存在性门禁，构建后自动检查，缺失即构建失败
+版本规则：Git 固定 2.55.0.3（构建脚本硬编码，升级需改 `$gitTag`/`$gitVer`）；Node 跟随上游选择器主版本 22，缓存里的具体 patch 版本随上游 `NodeVersion` 更新而变；uv 固定 0.12.3；Python 跟随上游选择器 3.11。上游以后修改 `PythonVersion`、`NodeVersion` 或 `package.json` 的 `engines.npm` 时，构建器会读取新要求并自动适配（包内 npm 不足时自动升级；npm 升级命令会清掉官方捆绑的 corepack，因此脚本在升级前读取官方捆绑的 corepack 版本、升级后按该版本重装，版本始终跟随 Node zip，无硬编码）。用户端更新脚本（`Update-Portable.ps1 -Stage SyncDesktop`）同样会在 TUI 重建前检查并升级包内 npm（同样先读版本后重装 corepack），因此官方提升 npm 要求不会卡住老部署的更新。`Verify-Portable.ps1` 对成品 Node 的 corepack 本体与 shim 设有存在性门禁，构建后自动检查，缺失即构建失败。
+
+## 构建
+
+只组装 Portable 目录、跳过 ZIP 打包（压缩 32,000+ 个文件约需数分钟）：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  D:\Hermes-Agent-Portable-Builder\builder\templates\Hermes.ps1 `
+  D:\Hermes-Agent-Portable-Builder\builder\source\Hermes.ps1 `
   -SkipArchive
 ```
 
-输出：
+输出：`D:\Hermes-Agent-Portable-Builder\stage\Hermes-Agent-Portable`
 
-```text
-D:\Hermes-Agent-Portable-Builder\stage\Hermes-Agent-Portable
-```
-
-`-SkipArchive` 表示只组装 Portable 目录、跳过 ZIP 打包（压缩 32,000+ 个文件约需数分钟）构建
-逻辑与完整构建完全一致，只是不产出压缩包；想要 `dist\` 下的 ZIP 时不加任何开关直接运行即可
+完整构建（产出 `dist\` 下的 ZIP）：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  D:\Hermes-Agent-Portable-Builder\builder\templates\Hermes.ps1
+  D:\Hermes-Agent-Portable-Builder\builder\source\Hermes.ps1
 ```
 
-输出：
+输出：`D:\Hermes-Agent-Portable-Builder\dist\Hermes-Agent-Portable-<版本>-win-x64-<时间戳>.zip`
 
-```text
-D:\Hermes-Agent-Portable-Builder\dist\Hermes-Agent-Portable-<版本>-win-x64-<时间戳>.zip
+构建始终是完整流程，没有跳过 Desktop 重建的开关（曾有的 `-SkipDesktopBuild` 已于 2026-08-07 移除，因为它会让 Python 解析走不同路径、掩盖构建脚本缺陷；以后排查问题时只有一条构建路径可循）。
+
+构建流程（约 10-30 分钟，视缓存与网络）：
+
+1. 校验 Windows x64；校验/克隆官方源码到 `upstream\`（缺失或失败自动克隆，3 次重试）
+2. 清空并重建 `stage\Hermes-Agent-Portable`
+3. 解析托管组件（own assets 缓存优先 → 缺失下载并回填缓存）：uv 固定 0.12.3 → 官方选择器 Python（当前 3.11）→ 官方选择器 Node（主版本 22）→ PortableGit 固定 2.55.0.3
+4. 创建**可重定位** venv：`uv sync --extra all --locked --no-install-project --link-mode copy`（wheel 走 uv 构建机用户级缓存，离线优先、缺失才下载；不生成含构建绝对路径的 editable metadata）
+5. 按官方 `engines.npm` 要求升级包内 npm（不足时自动升级，升级后按官方捆绑版本重装 corepack）
+6. 对官方 Desktop 源码打便携补丁（`Update-Portable.ps1 -Stage Patch`）→ npm workspace 安装 + typecheck + build + electron-builder `--dir` → 立即 `-Stage PatchRemove` 还原（源码与官方逐字节一致）
+7. 网页端 workspace 安装 + `npm run build`（vite 输出到 `hermes_cli\web_dist\`），最后写入 `data\hermes-home\web-ui-build-stamp.json`（内容哈希）
+8. 编译 `Hermes.exe`（winexe + 官方图标）与 `Update.exe`（csc）→ 部署入口脚本（hermes-cli/tui/dashboard .cmd）→ 注入 README 版本号（dsh/commit/node/git/uv）
+9. 组装内嵌 git 配置（longpaths + autocrlf false + eol lf）→ reset/clean → 干净性检查（`status --porcelain` 与 `stash list` 必须为空）
+10. 契约门禁：`Test-PortablePythonContract`（PortablePythonBootstrap / ExternalOverlayPackaged / RuntimeToolsUnique / BuildOnlyFilesPackaged / EmbeddedCheckoutIsOfficialOnly）+ `Test-PortableNoEditableInstall`（拒绝 `__editable__*`/`.egg-link`/`.pth` 绝对路径）+ `Verify-Portable.ps1`（McpImports: mcp-ok、WebDist 等）
+11. 打包 checkout `git rm --cached` + `reset --hard`（行尾 LF 规范化）→ 写 Desktop/Web 构建 stamp（增量判断依据）
+12. 7za 归档 → `dist\` 产出 ZIP（可选 `-SkipArchive` 跳过）
+
+## 同步 upstream
+
+构建前建议先同步（upstream 是只读镜像，默认分支为 `main`，可随时重置）：
+
+```powershell
+git -C D:\Hermes-Agent-Portable-Builder\upstream fetch --prune origin
+git -C D:\Hermes-Agent-Portable-Builder\upstream reset --hard origin/main
 ```
 
-构建始终是完整流程，没有跳过 Desktop 重建的开关（曾有的 `-SkipDesktopBuild` 已于 2026-08-07 移除，
-因为它会让 Python 解析走不同路径、掩盖构建脚本缺陷；以后排查问题时只有一条构建路径可循）
+这不会影响同级的 `stage\` 目录。
 
-首次构建会直接在 `stage\Hermes-Agent-Portable` 中组装出：uv、官方指定版本的
-Python、venv 与锁定依赖、官方指定主版本的 Node.js、PortableGit。其中 uv 二进制、Python
-运行时、Node.js、PortableGit 全部来自 `builder\assets\` 离线缓存（缓存缺失时才下载并回填
-缓存）；Python 依赖的 wheel 则走 uv 的构建机用户级缓存（Windows 默认
-`%LOCALAPPDATA%\uv\cache`，构建脚本不设 `UV_CACHE_DIR`），同样离线优先、缺失才下载。
-它是"从零组装"，不需要 seed（即
-不拿任何旧 Portable 当底料来增量改造），也不会创建 `.old-release-extract` 之类的旧版本暂存目录
+## 便携包说明
 
-npm 依赖与 Electron 二进制同样离线优先：构建脚本把 `npm_config_cache`、`ELECTRON_CACHE`、
-`ELECTRON_BUILDER_CACHE` 指向 `builder\assets\npm-cache`、`electron-cache`、`electron-builder-cache`，
-各 workspace 安装带 `--prefer-offline`——首次在线构建回填缓存，之后的构建（含 electron 下载）
-完全离线，与 Git/Node 同一契约（uv 二进制同样在 assets，其 Python 包缓存见上文说明）
+产物结构：
 
-当前构建目标明确为 **Windows x64**；ARM64/x86 会在入口被拒绝，避免把不同架构的 Python、
-Node、Git 和 Electron 混装。缺少 uv 时用固定的 0.12.3；Python 依赖使用
-`uv.lock`、`--no-install-project` 和 copy 模式，不生成含构建绝对路径的 editable metadata
+```
+Hermes-Agent-Portable\
+├── Hermes.exe          # 启动器（winexe）：设 HERMES_HOME → 启后端/桌面 → 托盘驻留；首启原子创建最小配置
+├── Update.exe          # 原地更新器：官方 hermes update + 依赖修复 + 桌面同步，数据不动（见"升级策略"）
+├── app\                # Electron 桌面端（编译产物 app.asar*，官方源码不内嵌补丁）
+├── runtime\            # uv / Python / venv（可重定位，link-mode copy）
+├── data\hermes-home\   # HERMES_HOME 用户数据（配置/记忆/技能/内嵌官方源码）
+├── scripts\            # Update-Portable.ps1 / Repair-Portable.ps1 / Verify-Portable.ps1（与 builder\scripts\ byte-identical）
+└── README.txt          # 给最终用户的说明
+```
 
-构建器不读取 `HERMES_PORTABLE_RUNTIME_SEED`（"种子"环境变量，指向一个旧 Portable 供复用），也不读取
-同级旧 Portable，**运行时组件完全不读取系统**（系统里有没有 Git/uv/Node/Python 都不影响构建，产物只
-来自 assets 缓存）。Python 和 venv 都写入新成品自己的运行时目录，venv 始终重新生成，因此最终包不会
-依赖构建机上的系统路径，也不会继承旧版本里的任何残留状态
+- 入口点（`runtime\bin\`，全部由 `builder\source\` 生成并按 byte-identical 部署）：
+  - `hermes-cli.cmd`：通用 CLI（清除桌面 App 泄漏的 `HERMES_WEB_DIST`，使用随包预构建网页版前端）
+  - `hermes-tui.cmd`：TUI 入口（`--tui`）
+  - `hermes-dashboard.cmd`：网页端入口，解析 `--port N`/`--port=N`（默认 9119；`--port 0` 自动分配；端口已有服务则直接打开浏览器）
+- 数据随包走：`data\hermes-home\` 内所有用户数据跟随目录移动；覆盖升级不要先删旧 `data\`
+- 用户配置保护：发行包**不含** `data\hermes-home\config.yaml`；首启仅在文件不存在时原子创建最小配置 `display.language: zh`，已存在则完全不读写（见下节）
 
-构建脚本会临时修改官方 Desktop 源码，构建结束后立即移除补丁，修改内容详见下文
-「构建对官方源码的修改」章节。构建项目的完整覆盖层只保留在
-构建机的 `builder\`，不会复制到成品或内嵌官方 Git 源码。Builder 管理的成品 data 种子源码位于
-`builder\data\`（`hermes-home\memories\`、`hermes-home\skills\` 等），整个目录树按原结构复制到成品对应的 `data\`
+## 推理等级与 DeepSeek 的对应
 
-技能目录中的 `SKILL.md` 与 `references\` 会按原结构复制（自 2026-08-12 起不再强制要求技能存在或精简，`hermes-agent-portable-builder` 技能门禁已移除）。Portable 运行维护脚本
-只保留一份在成品根 `scripts\`（`Update-Portable.ps1` + `Repair-Portable.ps1` + `Verify-Portable.ps1`）；
-构建脚本、测试、模板和 7-Zip 只属于构建项目，不进入成品。这样既能加载技能，又不会复制重复工具或构建源码
+Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDER`：`minimal/low/medium/high/xhigh/max/ultra`，桌面端中文 UI 显示为 最小/低/中/高/极高/最高/超高）。DeepSeek 官方 API **只有 low / high / max 三档**（官方文档 [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)），`medium`/`xhigh` 作为请求值会被官方**静默映射成 high**。Hermes 各档在 DeepSeek 上的实际生效值如下：
+
+| Hermes 中文 | 内部值 | DeepSeek 实际生效 | 说明 |
+|---|---|---|---|
+| 最小 | `minimal` | `low` | DeepSeek 没有 `minimal` → 归到最低档 `low` |
+| 低 | `low` | `low` | 一一对应 |
+| 中 | `medium` | `high` | DeepSeek 没有 `medium`，官方把它映射成 `high` |
+| 高 | `high` | `high` | 一一对应 |
+| 极高 | `xhigh` | `high` | 官方把 `xhigh` 映射成 `high`（Hermes 源码 `DEEPSEEK_V4_OVERRIDES` 声明为 `max`，与官方文档不一致，以官方为准） |
+| 最高 | `max` | `max` | 一一对应 |
+| 超高 | `ultra` | `max` | DeepSeek 没有 `ultra` → 归到最高档 `max` |
+| 关闭 | `none`/off | 关闭思考 | 发送 `thinking.type=disabled`，不发 `reasoning_effort` |
+
+要点：
+
+- DeepSeek 官方档位只有 **low / high / max**；默认 effort 为 **high**（不设置时服务器默认）
+- 官方映射表（`deepseek-v4-flash`/`deepseek-v4-pro` 相同）：`low→low`、`medium→high`、`high→high`、`xhigh→high`、`max→max`——即 Hermes 的"中/高/极高"三档在 DeepSeek 上实际都是 `high`
+- 归并策略是"只降不升"：Hermes 不支持的档位取最近**更弱**的支持等级，绝不静默升档
+- 对照 DeepSeek Harness（dsh）：dsh 对 `deepseek-v4-flash` 只声明 `off/low/high/max`，`medium` 会被直接拒绝（`UNSUPPORTED_REASONING_EFFORT`）；DeepSeek 官方则接受 `medium` 但映射成 `high`
+
 
 ## 用户配置保护
 
@@ -101,31 +139,19 @@ Node、Git 和 Electron 混装。缺少 uv 时用固定的 0.12.3；Python 依�
 | 改后 | 构建**确保发行包不含** `data\hermes-home\config.yaml`：正常流程中该文件从不出现（成品由**未启动**的官方源码组装，`config.yaml` 只会在用户首次启动时生成）；构建脚本以 fail-closed 守卫兜底（组装中段**有意外残留则先删、删不掉即失败**，最终由 Python 契约门禁复核缺席，报告 `UserConfigPackaged=false`）；首次启动时启动器仅在文件**不存在**的情况下，以原子 `CreateNew`/`wx` 方式创建一份最小配置 |
 | 效果 | 全新用户自动获得中文界面；配置已存在的用户**完全不读写、不合并、不替换**，覆盖升级不丢任何设置 |
 
-首启创建的最小配置：
-
-```yaml
-display:
-  language: zh
-```
-
 因此把新 ZIP 解压覆盖到已有 Portable 时，不会用发布包中的默认配置覆盖以下用户设置：
 
 - MCP 服务器；
 - 自定义 Provider、模型和 API 端点；
 - 工具、终端、语言及其他偏好
 
-`.env`、`auth.json`、`state.db` 等用户状态也不应进入发布 ZIP。覆盖升级时不要先删除旧的
-`data\` 目录；ZIP 没有同名用户文件时，原数据会继续保留
+`.env`、`auth.json`、`state.db` 等用户状态也不应进入发布 ZIP。覆盖升级时不要先删除旧的 `data\` 目录；ZIP 没有同名用户文件时，原数据会继续保留。
 
 ## 构建对官方源码的修改
 
-构建器会用 `builder\scripts\Update-Portable.ps1 -Stage Patch` 对 `upstream\` 的官方 Desktop
-源码**临时**打补丁：`npm run build`（electron-builder）编译完成后立即用 `-Stage PatchRemove` 还原，
-源码始终与官方逐字节一致，改动只烙在编译产物（`app\resources\app.asar*`）里。补丁全部是
-标记包围（`HERMES_PORTABLE_*_BEGIN/END`）、可重复应用、可完整撤销的；撤销后
-`git status --porcelain` 必须为空
+构建器会用 `builder\scripts\Update-Portable.ps1 -Stage Patch` 对 `upstream\` 的官方 Desktop 源码**临时**打补丁：`npm run build`（electron-builder）编译完成后立即用 `-Stage PatchRemove` 还原，源码始终与官方逐字节一致，改动只烙在编译产物（`app\resources\app.asar*`）里。补丁全部是标记包围（`HERMES_PORTABLE_*_BEGIN/END`）、可重复应用、可完整撤销的；撤销后 `git status --porcelain` 必须为空。
 
-### 修改清单（6 项）
+### 修改清单（7 项）
 
 #### 1. 便携路径重定向
 
@@ -181,70 +207,41 @@ display:
 | 改后 | `config.yaml` 不存在时写入 `display.language: zh` |
 | 效果 | 用户绕过启动器、直接双击 `app\Hermes.exe` 时，仍能获得中文默认；配置已存在则不触碰 |
 
+
+#### 7. 默认透明度关闭
+
+| | |
+|---|---|
+| 文件 | `apps/shared/src/translucency.ts`（`defaultTranslucencyValues`） |
+| 改前 | 官方默认 `light: { intensity: 66, ... }` / `dark: { intensity: 22, ... }`——浅色主题整窗淡到约 70% 原生透明度，文字/界面对比度明显下降 |
+| 改后 | 两主题默认 `intensity: 0`（补丁标记包围 `HERMES_PORTABLE_TRANSLUCENCY_BEGIN/END`）——默认不透明，用户需要可在桌面设置里自行开启 |
+| 效果 | 浅色主题默认清晰可读；**抗漂移**：按结构匹配任意官方数字、一律改成 0，原值捕获进补丁标记（"was light N / dark M"），`PatchRemove` 精确还原捕获的原值（官方改成什么就还原什么，逐字节一致） |
+| 注意 | `apps/shared` 不在桌面内容哈希范围内（官方 `_compute_desktop_content_hash` 只走 `apps/desktop`），因此该补丁通过完整构建进入产物；部署侧 SyncDesktop 仅当 `apps/desktop` 变化时才强制重建桌面 |
 ### 首次启动播种（启动器，非源码补丁）
 
 | | |
 |---|---|
-| 文件 | `builder\templates\Hermes.cs`，编译为根目录 `Hermes.exe`。注意：这不是源码补丁，而是启动器自带的逻辑 |
+| 文件 | `builder\source\Hermes.cs`，编译为根目录 `Hermes.exe`。注意：这不是源码补丁，而是启动器自带的逻辑 |
 | 改前 | 官方启动器不写配置文件：全新安装直接使用内置 `DEFAULT_CONFIG` |
 | 改后 | 发行包不含 `config.yaml`（见"用户配置保护"：构建中段有意外残留则**先删、删不掉即失败**——删除型 fail-closed 守卫；最终契约门禁再复核缺席），首启时 `EnsureFirstRunConfig()` 仅在文件**不存在**时原子创建最小配置：`display.language: zh` |
 | 效果 | 全新用户默认中文界面；配置一旦存在，启动器从此不再读写它，用户设置永不被打扰 |
 
-### 入口点与网页端（启动器模板与构建步骤，非源码补丁）
-
-`runtime\bin\` 下有三个入口点，全部由 `builder\templates\` 生成并按 byte-identical 部署：
-
-| 入口 | 用途 |
-|---|---|
-| `hermes-cli.cmd` | 通用 CLI。会清除桌面 App 泄漏的 `HERMES_WEB_DIST` 环境变量，确保独立运行的 `hermes dashboard` 使用随包预构建的 `hermes_cli\web_dist\` 网页版前端，而不是需要桌面 IPC 桥的 Electron 桌面包（后者在浏览器里会报 "Desktop IPC bridge is unavailable"） |
-| `hermes-tui.cmd` | TUI 入口（`--tui`） |
-| `hermes-dashboard.cmd` | 网页端入口：解析 `--port N` 与 `--port=N` 两种写法（默认 9119；编辑文件顶部 `PORT` 行可固定端口；`--port 0` 自动分配）。若目标端口已有服务在监听则直接打开浏览器，否则启动服务并自动打开浏览器。注意 `shift` 会覆盖 `%0`（脚本路径），必须先 `set "BIN=%~dp0"` 再解析参数 |
-
-构建脚本预构建网页版前端并写入构建 stamp：
-
-- `npm install --workspace web --include=dev` + `web\` 内 `npm run build`（vite 输出到 `hermes_cli\web_dist\`）；
-- 用 staged venv 调用官方 `_write_web_ui_build_stamp` 写入 `data\hermes-home\web-ui-build-stamp.json`（web 源码内容哈希）；**必须是最后一步** —— stage 的 `git rm --cached` + `reset --hard`（行尾 LF 规范化，真正的重写发生在这一步；之前的 `reset --hard` 会被 git stat cache 跳过）会把跟踪文件从 CRLF 改写为 LF，改变哈希覆盖的字节；提前写 stamp 会导致用户首次启动时哈希不匹配而触发重建；
-- 效果：用户首次运行 `hermes dashboard` 时内容哈希一致，跳过运行时 `npm install` 与重建，离线秒开（与 TUI bundle 同一契约）。stage 的 `git clean -fdx` 排除 `hermes_cli\web_dist\`，更新脚本（`Update-Portable.ps1 -Stage SyncDesktop`）同样在官方 `_web_ui_build_needed` 判定需要时重建 bundle 并重写 stamp（源码未变则跳过）
-
 ### 设计契约
 
 - 补丁必须标记包围、可重复应用、可完整撤销；撤销后源码与官方逐字节一致（`git status --porcelain` 为空）
-- 随包发布的 `scripts\*.ps1`（含补丁脚本）与 `builder\` 源码 byte-identical；改动后需重新构建
-  同步全部副本，不得只改部署侧
+- 随包发布的 `scripts\*.ps1`（含补丁脚本）与 `builder\` 源码 byte-identical；改动后需重新构建同步全部副本，不得只改部署侧
 - 上述修改只存在于构建窗口期；发布 ZIP 内嵌的官方源码保持官方原样
-- 更新流程同样不留补丁：`Update-Portable.ps1 -Stage SyncDesktop` 在桌面同步（原子交换）完成后自动执行
-  `-Stage PatchRemove` 自清理；`Update.exe` 在官方 `hermes update` 前另有
-  `-Remove` + `git clean -fd` 兜底，并在官方 `hermes update` 前与 `-UpdatePython` 前各执行一次
-  `StopPortableProcesses`（按安装根路径停 Hermes/python，释放 cryptography DLL 锁与 venv 目录锁，
-  2026-08-15 修复）。因此无论构建还是更新路径，内嵌源码都以干净状态收尾，
-  绕过 Update.exe 直接运行官方 `hermes update` 也不会触发 "Restore local changes now? [Y/n]" stash 提示
-- 增量构建（2026-08-14）：SyncDesktop 对 Desktop/TUI/Web 分别增量判断——Desktop 用 `data\hermes-home\desktop-build-stamp.json`（构建时在**行尾规范化之后**写入的
-  `apps/desktop` + 根 package.json/lockfile 内容哈希，判断在补丁之前、以无补丁源码对比，构建机与用户侧算法一致；stamp 若在规范化前写入会因 CRLF/LF 字节差导致哈希错位、增量永远失效）；TUI/Web 直接调用官方
-  `_tui_need_rebuild` / `_web_ui_build_needed`。某部分源码没动就跳过其重建（Desktop 跳过时含补丁往返与 app 交换），
-  全部没动则整个 SyncDesktop 几乎零成本，更新明显加快
-
-## 同步官方
-
-```powershell
-git -C D:\Hermes-Agent-Portable-Builder\upstream fetch --prune origin
-git -C D:\Hermes-Agent-Portable-Builder\upstream reset --hard origin/main
-```
-
-这不会影响同级的 `stage\` 目录
+- 更新流程同样不留补丁：`Update-Portable.ps1 -Stage SyncDesktop` 在桌面同步（原子交换）完成后自动执行 `-Stage PatchRemove` 自清理；`Update.exe` 在官方 `hermes update` 前另有 `-Remove` + `git clean -fd` 兜底，并在官方 `hermes update` 前与 `-UpdatePython` 前各执行一次 `StopPortableProcesses`（按安装根路径停 Hermes/python，释放 cryptography DLL 锁与 venv 目录锁，2026-08-15 修复）。因此无论构建还是更新路径，内嵌源码都以干净状态收尾，绕过 Update.exe 直接运行官方 `hermes update` 也不会触发 "Restore local changes now? [Y/n]" stash 提示
+- 增量构建（2026-08-14）：SyncDesktop 对 Desktop/TUI/Web 分别增量判断——Desktop 用 `data\hermes-home\desktop-build-stamp.json`（构建时在**行尾规范化之后**写入的 `apps/desktop` + 根 package.json/lockfile 内容哈希，判断在补丁之前、以无补丁源码对比，构建机与用户侧算法一致；stamp 若在规范化前写入会因 CRLF/LF 字节差导致哈希错位、增量永远失效）；TUI/Web 直接调用官方 `_tui_need_rebuild` / `_web_ui_build_needed`。某部分源码没动就跳过其重建（Desktop 跳过时含补丁往返与 app 交换），全部没动则整个 SyncDesktop 几乎零成本，更新明显加快
 
 ## 依赖缓存维护
 
-上游升级 Python 依赖（`uv.lock`/`pyproject.toml`）或 npm 依赖（`package-lock.json`）后，
-构建会在各自缓存缺失时联网补齐并回填；也可以主动预下载和清理：
+上游升级 Python 依赖（`uv.lock`/`pyproject.toml`）或 npm 依赖（`package-lock.json`）后，构建会在各自缓存缺失时联网补齐并回填；也可以主动预下载和清理：
 
 - npm 缓存：`builder\assets\npm-cache`（`npm_config_cache`），`--prefer-offline` 全命中
-- uv 包缓存：构建机用户级 `%LOCALAPPDATA%\uv\cache`。预下载单个包用构建器自带 uv：
-  `uv.exe pip install --python <assets\python\cpython-3.11.*\python.exe> --target <临时目录> <包>==<版本>`
-  （用捆绑 Python 保证 wheel 口味与构建一致，下载即回填缓存）
-- 清理旧版本：删 `uv\cache\wheels-v6\pypi\<包>\` 下旧版本条目及 `archive-v0\` 对应解压目录；
-  `simple-v24\` 是 PyPI 索引元数据缓存（解析时自动生成），保留无害
-- 构建用 `uv sync --locked`，不做版本解析，`--locked` 下按 lockfile 的 URL/hash 取包，
-  因此锁定版本（cffi 2.0.0、pycparser 3.0 等）是否在缓存中决定是否需要联网
+- uv 包缓存：构建机用户级 `%LOCALAPPDATA%\uv\cache`。预下载单个包用构建器自带 uv：`uv.exe pip install --python <assets\python\cpython-3.11.*\python.exe> --target <临时目录> <包>==<版本>`（用捆绑 Python 保证 wheel 口味与构建一致，下载即回填缓存）
+- 清理旧版本：删 `uv\cache\wheels-v6\pypi\<包>\` 下旧版本条目及 `archive-v0\` 对应解压目录；`simple-v24\` 是 PyPI 索引元数据缓存（解析时自动生成），保留无害
+- 构建用 `uv sync --locked`，不做版本解析，`--locked` 下按 lockfile 的 URL/hash 取包，因此锁定版本（cffi 2.0.0、pycparser 3.0 等）是否在缓存中决定是否需要联网
 
 ## MCP 回归门禁
 
@@ -266,5 +263,34 @@ BuildOnlyFilesPackaged: false
 EmbeddedCheckoutIsOfficialOnly: true
 ```
 
-非 relocatable 元数据门禁（`Test-PortableNoEditableInstall`，同样已内联）拒绝
-`__editable__*` / `*.egg-link` 与 `.pth` 中的构建根绝对路径
+非 relocatable 元数据门禁（`Test-PortableNoEditableInstall`，同样已内联）拒绝 `__editable__*` / `*.egg-link` 与 `.pth` 中的构建根绝对路径。
+
+## 冒烟测试
+
+解压到临时目录后按发布验证清单执行（完整细节见技能 `hermes-agent-portable-builder`）：
+
+1. `scripts\Verify-Portable.ps1` 输出含 `McpImports: mcp-ok` 与 `WebDist` 项
+2. 契约门禁输出：`PortablePythonBootstrap: true`、`ExternalOverlayPackaged: false`、`RuntimeToolsUnique: true`、`BuildOnlyFilesPackaged: false`、`EmbeddedCheckoutIsOfficialOnly: true`
+3. 运行 `Hermes.exe`，首启后 `data\hermes-home\config.yaml` 生成且仅含 `display.language: zh`；再次启动不覆盖已有配置
+4. `runtime\bin\hermes-cli.cmd --version` 等入口正常；`hermes-dashboard.cmd` 启动后 `http://127.0.0.1:9119` 可达（默认端口）
+5. 内嵌官方源码与 upstream 逐字节一致（无补丁残留）；`data\hermes-home` 内嵌 checkout `git status` 干净
+6. 发行 ZIP 内**不含** `data\hermes-home\config.yaml`；`7za t` 完整性 OK；`data\` 只含预置内容
+
+## 升级策略
+
+Hermes 是活跃开发项目、迭代频繁。升级分两种情况：
+
+① 原地更新（推荐，不需重建）
+
+- 双击包根目录的 `Update.exe`：先做 github.com 网络预检（包内 node 探测，6 秒超时，网络不通秒级报原因且不做任何改动），再官方 `hermes update`（git 拉取 + 依赖安装）+ 便携环境修复 + 桌面同步（`Update-Portable.ps1 -Stage SyncDesktop`），失败输出自动分类（网络/DNS/权限）
+- 只更新源码/依赖/桌面端，用户数据 `data\hermes-home\` 原样保留；官方更新前自动停止本包进程（释放 cryptography DLL 锁与 venv 目录锁）并清理补丁
+- Desktop/TUI/Web 按 stamp 增量判断，源码没动就跳过对应重建
+- 注意：此方式不换 Python/Node 运行时版本，也不更新启动器/图标/入口脚本
+
+② 重新构建（当更新超出 Hermes 本身时）
+
+当新版 Hermes 提升 Python/Node 选择器、或需要换启动器/图标/入口脚本/README 时：同步 upstream → 重新构建 → 产出新 zip（`dist\` 按时间戳区分，旧归档可自行清理）。
+
+## 相关
+
+- 便携版运行机制细节、坑点清单见技能：`hermes-agent-portable-builder`（`builder\data\hermes-home\skills\software-development\hermes-agent-portable-builder`）

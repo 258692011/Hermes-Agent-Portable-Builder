@@ -213,9 +213,9 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 | | |
 |---|---|
 | 文件 | `apps/shared/src/translucency.ts`（`defaultTranslucencyValues`） |
-| 改前 | 官方默认 `light: { intensity: 66, ... }` / `dark: { intensity: 22, ... }`——浅色主题整窗淡到约 70% 原生透明度，文字/界面对比度明显下降 |
-| 改后 | 两主题默认 `intensity: 0`（补丁标记包围 `HERMES_PORTABLE_TRANSLUCENCY_BEGIN/END`）——默认不透明，用户需要可在桌面设置里自行开启 |
-| 效果 | 浅色主题默认清晰可读；**抗漂移**：按结构匹配任意官方数字、一律改成 0，原值捕获进补丁标记（"was light N / dark M"），`PatchRemove` 精确还原捕获的原值（官方改成什么就还原什么，逐字节一致） |
+| 改前 | 官方按平台默认：macos `light: { intensity: 66, ... }` / `dark: { intensity: 22, ... }`，windows `light: { intensity: 20, ... }` / `dark: { intensity: 5, ... }`——浅色主题整窗淡到约 70% 原生透明度，文字/界面对比度明显下降 |
+| 改后 | **两套平台**（macos + windows）默认全部 `intensity: 0`（补丁标记包围 `HERMES_PORTABLE_TRANSLUCENCY_BEGIN/END`）——默认不透明，用户需要可在桌面设置里自行开启 |
+| 效果 | 浅色主题默认清晰可读；**抗漂移**：按结构匹配任意官方数字、一律改成 0，原值捕获进补丁标记（"was light N / dark M, windows light N / dark M"），`PatchRemove` 精确还原捕获的原值（官方改成什么就还原什么，逐字节一致） |
 | 注意 | `apps/shared` 不在桌面内容哈希范围内（官方 `_compute_desktop_content_hash` 只走 `apps/desktop`），因此该补丁通过完整构建进入产物；部署侧 SyncDesktop 仅当 `apps/desktop` 变化时才强制重建桌面 |
 ### 首次启动播种（启动器，非源码补丁）
 

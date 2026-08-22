@@ -146,28 +146,38 @@ function Apply-PortablePatch {
     $backendNeedle1 = '  const command = IS_WINDOWS && fileExists(venvPython) ? venvPython : python'
     $backendNeedle2 = '  const command = fileExists(venvPython) ? venvPython : findSystemPython()'
     # 7th portable patch: default translucency OFF, DRIFT-PROOF. The official
-    # light (fade:1 header) / dark (fade:0 titlebar) default lines in
-    # apps/shared/src/translucency.ts wash out the light-theme UI
-    # (NousResearch/hermes-agent#92200). They are matched by STRUCTURE with ANY
-    # intensity numbers (upstream may change them — the intent is always
+    # per-platform default lines in apps/shared/src/translucency.ts wash out
+    # the light-theme UI (NousResearch/hermes-agent#92200; the official
+    # per-platform macos/windows split landed later, 2026-08). BOTH the macos
+    # block (light fade:1 'header' / dark fade:0 'titlebar') and the windows
+    # block (light/dark fade:0 'under-window') are matched by STRUCTURE with
+    # ANY intensity numbers (upstream may change them — the intent is always
     # "default translucency OFF"), and the ORIGINAL numbers are captured inside
-    # the marker block ("was light N / dark M") so PatchRemove can restore them
-    # exactly even after upstream drifts. NOTE: apps/shared is OUTSIDE the
-    # desktop content hash scope (apps/desktop only, matching the official
-    # _compute_desktop_content_hash), so this patch ships via full builds; a
-    # deployed SyncDesktop rebuild is only forced when apps/desktop changes.
+    # the marker block ("was light N / dark M, windows light N / dark M") so
+    # PatchRemove can restore them exactly even after upstream drifts.
+    # NOTE: apps/shared is OUTSIDE the desktop content hash scope
+    # (apps/desktop only, matching the official _compute_desktop_content_hash),
+    # so this patch ships via full builds; a deployed SyncDesktop rebuild is
+    # only forced when apps/desktop changes.
     $translucencyBegin = '// HERMES_PORTABLE_TRANSLUCENCY_BEGIN'
     $translucencyEnd = '// HERMES_PORTABLE_TRANSLUCENCY_END'
-    # Light line: <indent>light: { intensity: <n>, fade: 1, material: 'header', scope: 'window' },
-    # Dark  line: <indent>dark: { intensity: <n>, fade: 0, material: 'titlebar', scope: 'window' }
-    # Groups: 1=indentL+prefix, 2=lightNum, 3=lightTail+\n, 4=indentD+prefix, 5=darkNum, 6=darkTail
-    $translucencyPattern = '(?m)^(\s*light: \{ intensity: )(\d+)(, fade: 1, material: ''header'', scope: ''window'' \},\n)(\s*dark: \{ intensity: )(\d+)(, fade: 0, material: ''titlebar'', scope: ''window'' \})$'
+    # macos block: <indent>light: { intensity: <n>, fade: 1, material: 'header', scope: 'window' },
+    #              <indent>dark:  { intensity: <n>, fade: 0, material: 'titlebar', scope: 'window' }
+    # windows block: light/dark fade:0, material: 'under-window' (both)
+    # Apply groups: 1=indentL+prefix, 2=macLightNum, 3=macLightTail+\n,
+    #               4=indentD+prefix, 5=macDarkNum, 6=macDarkTail+separator,
+    #               7=winIndentL+prefix, 8=winLightNum, 9=winLightTail+\n,
+    #               10=winIndentD+prefix, 11=winDarkNum, 12=winDarkTail
+    $translucencyPattern = '(?m)^(\s*light: \{ intensity: )(\d+)(, fade: 1, material: ''header'', scope: ''window'' \},\n)(\s*dark: \{ intensity: )(\d+)(, fade: 0, material: ''titlebar'', scope: ''window'' \}\n  \},\n  windows: \{\n)(\s*light: \{ intensity: )(\d+)(, fade: 0, material: ''under-window'', scope: ''window'' \},\n)(\s*dark: \{ intensity: )(\d+)(, fade: 0, material: ''under-window'', scope: ''window'' \})'
     # Full marker block for restore; captures the original numbers from the
-    # comment plus the line pieces to rebuild the official two lines exactly.
-    # Groups: 1=lightOrig, 2=darkOrig, 3=indentL+prefix, 4=lightZero,
-    #         5=lightTail("},"), 6=newline, 7=indentD+prefix, 8=darkZero,
-    #         9=darkTail.
-    $translucencyRestorePattern = '(?s)// HERMES_PORTABLE_TRANSLUCENCY_BEGIN.*?was light (\d+) / dark (\d+)[^\n]*\n(\s*light: \{ intensity: )(\d+)(, fade: 1, material: ''header'', scope: ''window'' \},)(\n)(\s*dark: \{ intensity: )(\d+)(, fade: 0, material: ''titlebar'', scope: ''window'' \})\s*// HERMES_PORTABLE_TRANSLUCENCY_END'
+    # comment plus the line pieces to rebuild the official four lines exactly.
+    # Groups: 1=macLightOrig, 2=macDarkOrig, 3=winLightOrig, 4=winDarkOrig,
+    #         5=indentL+prefix, 6=macLightZero, 7=macLightTail("},"),
+    #         8=newline, 9=indentD+prefix, 10=macDarkZero,
+    #         11=macDarkTail+separator, 12=winIndentL+prefix, 13=winLightZero,
+    #         14=winLightTail("},"), 15=newline, 16=winIndentD+prefix,
+    #         17=winDarkZero, 18=winDarkTail.
+    $translucencyRestorePattern = '(?s)// HERMES_PORTABLE_TRANSLUCENCY_BEGIN.*?was light (\d+) / dark (\d+), windows light (\d+) / dark (\d+)[^\n]*\n(\s*light: \{ intensity: )(\d+)(, fade: 1, material: ''header'', scope: ''window'' \},)(\n)(\s*dark: \{ intensity: )(\d+)(, fade: 0, material: ''titlebar'', scope: ''window'' \}\n  \},\n  windows: \{\n)(\s*light: \{ intensity: )(\d+)(, fade: 0, material: ''under-window'', scope: ''window'' \},)(\n)(\s*dark: \{ intensity: )(\d+)(, fade: 0, material: ''under-window'', scope: ''window'' \})\s*// HERMES_PORTABLE_TRANSLUCENCY_END'
     $backendBlock1 = @"
 $backendPatch1Begin
 // Portable: the packaged venv trampoline records the builder's build-tree
@@ -307,8 +317,10 @@ test('default zoom matches the Appearance 90% preset', () => {
         if ($translucencyText.Contains($translucencyBegin)) {
             $rm = [regex]::Match($translucencyText, $translucencyRestorePattern)
             if (-not $rm.Success) { throw 'Portable translucency default restore failed — marker block structure changed.' }
-            $official = $rm.Groups[3].Value + $rm.Groups[1].Value + $rm.Groups[5].Value +
-                        $rm.Groups[6].Value + $rm.Groups[7].Value + $rm.Groups[2].Value + $rm.Groups[9].Value
+            $official = $rm.Groups[5].Value + $rm.Groups[1].Value + $rm.Groups[7].Value + $rm.Groups[8].Value +
+                        $rm.Groups[9].Value + $rm.Groups[2].Value + $rm.Groups[11].Value +
+                        $rm.Groups[12].Value + $rm.Groups[3].Value + $rm.Groups[14].Value + $rm.Groups[15].Value +
+                        $rm.Groups[16].Value + $rm.Groups[4].Value + $rm.Groups[18].Value
             $translucencyText = $translucencyText.Substring(0, $rm.Index) + $official + $translucencyText.Substring($rm.Index + $rm.Length)
             Write-TextWithOriginalEol $Translucency $translucencyText $translucencyEol
         }
@@ -445,9 +457,11 @@ test('default zoom matches the Portable Appearance 100% preset', () => {
             param($m)
             $st.matched = $true
             return $translucencyBegin + "`n" +
-                "// Portable: default translucency OFF (was light " + $m.Groups[2].Value + " / dark " + $m.Groups[5].Value + ").`n" +
+                "// Portable: default translucency OFF (was light " + $m.Groups[2].Value + " / dark " + $m.Groups[5].Value + ", windows light " + $m.Groups[8].Value + " / dark " + $m.Groups[11].Value + ").`n" +
                 $m.Groups[1].Value + '0' + $m.Groups[3].Value +
-                $m.Groups[4].Value + '0' + $m.Groups[6].Value + "`n" +
+                $m.Groups[4].Value + '0' + $m.Groups[6].Value +
+                $m.Groups[7].Value + '0' + $m.Groups[9].Value +
+                $m.Groups[10].Value + '0' + $m.Groups[12].Value + "`n" +
                 $translucencyEnd
         })
         if (-not $st.matched) { throw 'Portable translucency default block was not found (structure changed).' }

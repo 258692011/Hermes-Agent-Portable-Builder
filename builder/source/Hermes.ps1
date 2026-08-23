@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BuilderRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [switch]$SkipArchive
 )

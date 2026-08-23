@@ -566,6 +566,51 @@ function Test-PortableNoEditableInstall([string]$Root) {
     [ordered]@{ EditableMetadataPresent = $false; BuildRootInPth = $false } | ConvertTo-Json
 }
 
+function Convert-PackagedGitToShallow([string]$Checkout, [string]$Repo) {
+    # 把打包 checkout 的内嵌 .git 从完整历史浅化到 depth 1，砍掉 ~670MB 历史
+    # 对象（737MB -> ~69MB）。官方 installer 本身用 `git clone --depth 1`，且
+    # update_cmd.py 检测 `rev-parse --is-shallow-repository` 后用 `--depth 1`
+    # fetch 保持边界（增量、不 unshallow）。此处离线从本地 upstream 浅 fetch，
+    # 再删掉让历史对象保持 reachable 的 origin 分支 refs 与本地 tags，最后 gc
+    # 物理删除历史对象。
+    # PITFALL (2026-08-23): `git clone --depth 1 <本地路径>` 会被 git 的 --local
+    # hardlink 优化忽略 --depth（得到完整历史），必须用 fetch --depth 1 强制浅化。
+    # PITFALL: origin 带来的成百上千个 remote-tracking 分支 refs（update_cmd.py
+    # 也提到 "thousands of auto-generated branches"）以及本地版本/备份 tags 都
+    # 引用历史 commit，gc 删不掉 —— 必须先清掉它们。
+    # PITFALL: 用 [char]0x5C 表示反斜杠，避免 patch/编辑工具把字面反斜杠写坏。
+    $localRepo = $Repo.Replace([char]0x5C, [char]0x2F)
+    # origin URL 先读本地 upstream，读不到（无 origin）则回退读 checkout 当前
+    # origin（浅化前它复制自 upstream .git），两者皆缺才 throw。
+    $originUrlRaw = Invoke-NativeChecked 'Resolve upstream origin url' -AllowFailure { (& git.exe -C $Repo remote get-url origin 2>$null) | Select-Object -First 1 }
+    $originUrl = if ($originUrlRaw) { $originUrlRaw.Trim() } else { '' }
+    if (-not $originUrl) {
+        $stagedOriginRaw = Invoke-NativeChecked 'Resolve staged origin url' -AllowFailure { (& git.exe -C $Checkout remote get-url origin 2>$null) | Select-Object -First 1 }
+        $originUrl = if ($stagedOriginRaw) { $stagedOriginRaw.Trim() } else { '' }
+    }
+    if (-not $originUrl) { throw 'Cannot resolve origin URL for the packaged checkout (upstream has no origin remote).' }
+    Invoke-NativeChecked 'Shallow-fetch from local upstream' { & git.exe -C $Checkout fetch --depth 1 --no-tags $localRepo main | Out-Null }
+    Invoke-NativeChecked 'Reset to shallow tip' { & git.exe -C $Checkout reset --hard FETCH_HEAD | Out-Null }
+    # Fail closed: the shallow fetch pins the packaged checkout to upstream's
+    # CURRENT main, but the build compiled Desktop/TUI/Web and stamped README
+    # against $commit resolved at build start. If upstream moved between the
+    # two (parallel build, manual reset), the packaged source would silently
+    # diverge from the artifacts — refuse rather than ship a mismatched pack.
+    $shallowHead = (Invoke-NativeChecked 'Resolve shallow tip' { & git.exe -C $Checkout rev-parse HEAD }).Trim()
+    if ($shallowHead -ne $commit) {
+        throw "Shallow tip $shallowHead differs from build commit $commit (upstream moved during build?)"
+    }
+    Invoke-NativeChecked 'Drop origin branch refs' {
+        & git.exe -C $Checkout remote remove origin | Out-Null
+        & git.exe -C $Checkout remote add origin $originUrl | Out-Null
+    }
+    foreach ($tag in (& git.exe -C $Checkout tag)) {
+        Invoke-NativeChecked "Delete tag $tag" { & git.exe -C $Checkout tag -d $tag | Out-Null }
+    }
+    Invoke-NativeChecked 'Expire reflog' { & git.exe -C $Checkout reflog expire --expire=now --all | Out-Null }
+    Invoke-NativeChecked 'GC prune history objects' { & git.exe -C $Checkout gc --prune=now --aggressive | Out-Null }
+}
+
 # Release gate (merged into the build script 2026-08-10): a broad
 # contract check of the assembled stage — Python follows the official
 # selector via current.txt (no hard-coded runtime dir), the CLI launcher wires
@@ -903,6 +948,10 @@ Copy-Tree (Join-Path $Repo '.git') $PackedGit
 Invoke-NativeChecked 'Packed git config longpaths' { & git.exe -C $Checkout config core.longpaths true }
 Invoke-NativeChecked 'Packed git config autocrlf' { & git.exe -C $Checkout config core.autocrlf false }
 Invoke-NativeChecked 'Packed git config eol' { & git.exe -C $Checkout config core.eol lf }
+# 浅化内嵌 .git（砍掉完整历史，省 ~670MB）：在行尾规范化之前把 .git 降到
+# depth 1，之后 `git rm --cached` + `reset --hard` 仍照常做行尾规范化，且不
+# 会破坏 shallow 状态（只动 index/工作树，不碰 .git/shallow 与 HEAD）。
+Convert-PackagedGitToShallow $Checkout $Repo
 # The staged working tree was robocopy-copied from upstream and may carry
 # CRLF bytes while the index (with autocrlf=false above) expects LF. git's
 # stat cache then hides the mismatch until the ZIP is extracted on another

@@ -71,7 +71,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 8. 编译 `Hermes.exe`（winexe + 官方图标）与 `Update.exe`（csc）→ 部署入口脚本（hermes-cli/tui/dashboard .cmd）→ 注入 README 版本号（dsh/commit/node/git/uv）
 9. 组装内嵌 git 配置（longpaths + autocrlf false + eol lf）→ reset/clean → 干净性检查（`status --porcelain` 与 `stash list` 必须为空）
 10. 契约门禁：`Test-PortablePythonContract`（PortablePythonBootstrap / ExternalOverlayPackaged / RuntimeToolsUnique / BuildOnlyFilesPackaged / EmbeddedCheckoutIsOfficialOnly）+ `Test-PortableNoEditableInstall`（拒绝 `__editable__*`/`.egg-link`/`.pth` 绝对路径）+ `Verify-Portable.ps1`（McpImports: mcp-ok、WebDist 等）
-11. 打包 checkout `git rm --cached` + `reset --hard`（行尾 LF 规范化）→ 写 Desktop/Web 构建 stamp（增量判断依据）
+11. 浅化内嵌 `.git`（`Convert-PackagedGitToShallow`：离线 `fetch --depth 1` + 清 origin 分支 refs/tags + `gc --prune=now`，完整历史 737MB → 深度 1 约 69MB；官方 `hermes update` 支持浅仓库更新（端到端已验证 2026-08-23：真实网络 `--check` 的 fetch 带 `--depth 1` 保持浅边界；本地 fixture 触发完整 update，`merge --ff-only`（update_cmd.py:6212-6213）快进新 commit 后 shallow 边界文件不变、.git 69M 不膨胀、status 干净、安装健康；fetch 的 `--depth 1` 依据 update_cmd.py:3196-3205/3225/3237））→ 打包 checkout `git rm --cached` + `reset --hard`（行尾 LF 规范化）→ 写 Desktop/Web 构建 stamp（增量判断依据）。注意：`Hermes.ps1` 必须保持 **UTF-8 with BOM** 编码——PowerShell 5.1 对无 BOM 文件按 GBK 解码，中文注释的 UTF-8 字节会吞掉换行、把后续代码行并入 `#` 注释静默失效（2026-08-23 三次构建失败教训：`$localRepo` 行被吞导致 `git fetch` 报 `'main' does not appear to be a git repository`）；从 D 盘原版（无 BOM）复制回脚本后需重新加 BOM
 12. 7za 归档 → `dist\` 产出 ZIP（可选 `-SkipArchive` 跳过）
 
 ## 同步 upstream
@@ -95,7 +95,7 @@ Hermes-Agent-Portable\
 ├── Update.exe          # 原地更新器：官方 hermes update + 依赖修复 + 桌面同步，数据不动（见"升级策略"）
 ├── app\                # Electron 桌面端（编译产物 app.asar*，官方源码不内嵌补丁）
 ├── runtime\            # uv / Python / venv（可重定位，link-mode copy）
-├── data\hermes-home\   # HERMES_HOME 用户数据（配置/记忆/技能/内嵌官方源码）
+├── data\hermes-home\   # HERMES_HOME 用户数据（配置/记忆/技能/内嵌官方源码；内嵌 git 为 depth 1 浅仓库，`hermes update` 增量更新）
 ├── scripts\            # Update-Portable.ps1 / Repair-Portable.ps1 / Verify-Portable.ps1（与 builder\scripts\ byte-identical）
 └── README.txt          # 给最终用户的说明
 ```
@@ -232,7 +232,7 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 - 随包发布的 `scripts\*.ps1`（含补丁脚本）与 `builder\` 源码 byte-identical；改动后需重新构建同步全部副本，不得只改部署侧
 - 上述修改只存在于构建窗口期；发布 ZIP 内嵌的官方源码保持官方原样
 - 更新流程同样不留补丁：`Update-Portable.ps1 -Stage SyncDesktop` 在桌面同步（原子交换）完成后自动执行 `-Stage PatchRemove` 自清理；`Update.exe` 在官方 `hermes update` 前另有 `-Remove` + `git clean -fd` 兜底，并在官方 `hermes update` 前与 `-UpdatePython` 前各执行一次 `StopPortableProcesses`（按安装根路径停 Hermes/python，释放 cryptography DLL 锁与 venv 目录锁，2026-08-15 修复）。因此无论构建还是更新路径，内嵌源码都以干净状态收尾，绕过 Update.exe 直接运行官方 `hermes update` 也不会触发 "Restore local changes now? [Y/n]" stash 提示
-- 增量构建（2026-08-14）：SyncDesktop 对 Desktop/TUI/Web 分别增量判断——Desktop 用 `data\hermes-home\desktop-build-stamp.json`（构建时在行尾规范化之后写入的 `apps/desktop` + 根 package.json/lockfile 内容哈希，判断在补丁之前、以无补丁源码对比，构建机与用户侧算法一致；stamp 若在规范化前写入会因 CRLF/LF 字节差导致哈希错位、增量永远失效）；TUI/Web 直接调用官方 `_tui_need_rebuild` / `_web_ui_build_needed`。某部分源码没动就跳过其重建（Desktop 跳过时含补丁往返与 app 交换），全部没动则整个 SyncDesktop 几乎零成本，更新明显加快
+- 增量构建（2026-08-14）：SyncDesktop 对 Desktop/TUI/Web 分别增量判断——Desktop 用 `data\hermes-home\desktop-build-stamp.json`（构建时在行尾规范化之后写入的 `apps/desktop` + 根 package.json/lockfile 内容哈希，判断在补丁之前、以无补丁源码对比，构建机与部署后的便携版上运行的算法一致；stamp 若在规范化前写入会因 CRLF/LF 字节差导致哈希错位、增量永远失效）；TUI/Web 直接调用官方 `_tui_need_rebuild` / `_web_ui_build_needed`。某部分源码没动就跳过其重建（Desktop 跳过时含补丁往返与 app 交换），全部没动则整个 SyncDesktop 几乎零成本，更新明显加快
 
 ## 依赖缓存维护
 

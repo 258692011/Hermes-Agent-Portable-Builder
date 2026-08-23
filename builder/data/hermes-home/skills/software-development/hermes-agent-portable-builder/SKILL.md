@@ -48,6 +48,8 @@ How to record:
 4. **Scope**: record only lessons that would save time if the same mistake recurs (project-specific, non-trivial, cost real time). Do not record one-off trivia, task progress, or anything stale in a week. When unsure whether a lesson is worth recording, record it — a concise pitfall is cheap; re-learning the mistake is not.
 5. **Report**: in the final reply, state what was added and that both copies are in sync.
 
+术语约定: 两份副本或本地与远端内容不一致，一律称「差异」(divergence)，不要用「漂移」(drift) 之类的说法。
+
 ## Upstream Sync (mandatory every build)
 
 Before every build, sync `upstream/` to exactly mirror `origin/main`:
@@ -196,7 +198,7 @@ Capture:
 - readiness protocol
 - shutdown and updater ownership
 
-- The portable patch set is now 7 (see builder README "构建对官方源码的修改"): path redirect, python backend, zoom 100% + test + restore, language seed, and translucency OFF (light/dark defaults -> intensity 0, marker-bounded HERMES_PORTABLE_TRANSLUCENCY_BEGIN/END; PatchRemove restores the captured originals byte-identical, drift-proof). Note apps/shared is outside the desktop content hash scope, so the translucency patch ships via full builds.
+- The portable patch set is now 7 (see builder README "构建对官方源码的修改"): path redirect, python backend, zoom 100% + test + restore, language seed, and translucency OFF (light/dark defaults -> intensity 0, marker-bounded HERMES_PORTABLE_TRANSLUCENCY_BEGIN/END; PatchRemove restores the captured originals byte-identical, divergence-proof). Note apps/shared is outside the desktop content hash scope, so the translucency patch ships via full builds.
 A portable patch should reuse the app's canonical backend command builder rather than introducing a second launch path.
 
 ### 6. Choose the minimum viable portable shape

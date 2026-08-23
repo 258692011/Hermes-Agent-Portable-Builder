@@ -110,10 +110,13 @@ Assert-WindowsX64
 function Assert-Upstream {
     # The build consumes the official source checkout under upstream/.
     # If the folder is missing or empty, clone it from the official
-    # repository (full history: the packaged .git is copied from this
-    # checkout, so a shallow clone would ship a shallow .git inside the
-    # release archive). Non-empty non-git folders and incomplete snapshots
-    # are reported with an English error and are never deleted automatically.
+    # repository. upstream MUST keep full history: the staged checkout's
+    # `reset --hard $commit` and the packaged shallow-clone fetch (L592) both
+    # resolve objects from this mirror, and the release gate diffs against it.
+    # The SHIPPED .git is made shallow separately (Convert-PackagedGitToShallow,
+    # L945) — upstream itself stays full so those steps always have complete
+    # objects. Non-empty non-git folders and incomplete snapshots are reported
+    # with an English error and are never deleted automatically.
     $officialRepo = 'https://github.com/NousResearch/hermes-agent.git'
     $upstreamExists = Test-Path -LiteralPath $Repo
     $gitDir = Join-Path $Repo '.git'

@@ -44,7 +44,7 @@ How to record:
 
 1. **Where**: add a dated pitfall (`observed YYYY-MM-DD`) to the main `SKILL.md` Pitfalls section, or to the matching appendix in `references/hermes-agent-windows-portable.md` when it is a reference-level detail. Update the main SKILL.md with a short pointer line when the detail lives in the reference.
 2. **What**: symptom (exact error/behavior), root cause, the proven correct approach, and a one-line verification note. Name real files/line numbers where useful.
-3. **Both copies**: the skill ships twice — `builder\data\hermes-home\skills\software-development\hermes-agent-portable-builder\` (canonical source) and the active profile copy (`<portable-root>\data\hermes-home\skills\...`, what Hermes actually loads). Patch the builder copy, copy both files to the profile copy, and verify `diff` reports them byte-identical before finishing.
+3. **Both copies**: the skill ships twice — `builder\data\hermes-home\skills\software-development\hermes-agent-portable-builder\` (canonical source) and the active profile copy (`<portable-root>\data\hermes-home\skills\...`, what Hermes actually loads). Patch the builder copy, copy both files to the profile copy, verify `diff` reports them byte-identical before finishing, and commit+push the change to the `Hermes-Agent-Portable-Builder` repo.
 4. **Scope**: record only lessons that would save time if the same mistake recurs (project-specific, non-trivial, cost real time). Do not record one-off trivia, task progress, or anything stale in a week. When unsure whether a lesson is worth recording, record it — a concise pitfall is cheap; re-learning the mistake is not.
 5. **Report**: in the final reply, state what was added and that both copies are in sync.
 

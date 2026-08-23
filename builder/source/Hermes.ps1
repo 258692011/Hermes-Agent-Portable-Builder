@@ -567,21 +567,21 @@ function Test-PortableNoEditableInstall([string]$Root) {
 }
 
 function Convert-PackagedGitToShallow([string]$Checkout, [string]$Repo) {
-    # 把打包 checkout 的内嵌 .git 从完整历史浅化到 depth 1，砍掉 ~670MB 历史
+    # 把打包 checkout 的内嵌 .git 从完整历史浅克隆到 depth 1，砍掉 ~670MB 历史
     # 对象（737MB -> ~69MB）。官方 installer 本身用 `git clone --depth 1`，且
     # update_cmd.py 检测 `rev-parse --is-shallow-repository` 后用 `--depth 1`
     # fetch 保持边界（增量、不 unshallow）。此处离线从本地 upstream 浅 fetch，
     # 再删掉让历史对象保持 reachable 的 origin 分支 refs 与本地 tags，最后 gc
     # 物理删除历史对象。
     # PITFALL (2026-08-23): `git clone --depth 1 <本地路径>` 会被 git 的 --local
-    # hardlink 优化忽略 --depth（得到完整历史），必须用 fetch --depth 1 强制浅化。
+    # hardlink 优化忽略 --depth（得到完整历史），必须用 fetch --depth 1 强制浅克隆。
     # PITFALL: origin 带来的成百上千个 remote-tracking 分支 refs（update_cmd.py
     # 也提到 "thousands of auto-generated branches"）以及本地版本/备份 tags 都
     # 引用历史 commit，gc 删不掉 —— 必须先清掉它们。
     # PITFALL: 用 [char]0x5C 表示反斜杠，避免 patch/编辑工具把字面反斜杠写坏。
     $localRepo = $Repo.Replace([char]0x5C, [char]0x2F)
     # origin URL 先读本地 upstream，读不到（无 origin）则回退读 checkout 当前
-    # origin（浅化前它复制自 upstream .git），两者皆缺才 throw。
+    # origin（浅克隆前它复制自 upstream .git），两者皆缺才 throw。
     $originUrlRaw = Invoke-NativeChecked 'Resolve upstream origin url' -AllowFailure { (& git.exe -C $Repo remote get-url origin 2>$null) | Select-Object -First 1 }
     $originUrl = if ($originUrlRaw) { $originUrlRaw.Trim() } else { '' }
     if (-not $originUrl) {
@@ -948,7 +948,7 @@ Copy-Tree (Join-Path $Repo '.git') $PackedGit
 Invoke-NativeChecked 'Packed git config longpaths' { & git.exe -C $Checkout config core.longpaths true }
 Invoke-NativeChecked 'Packed git config autocrlf' { & git.exe -C $Checkout config core.autocrlf false }
 Invoke-NativeChecked 'Packed git config eol' { & git.exe -C $Checkout config core.eol lf }
-# 浅化内嵌 .git（砍掉完整历史，省 ~670MB）：在行尾规范化之前把 .git 降到
+# 浅克隆内嵌 .git（砍掉完整历史，省 ~670MB）：在行尾规范化之前把 .git 降到
 # depth 1，之后 `git rm --cached` + `reset --hard` 仍照常做行尾规范化，且不
 # 会破坏 shallow 状态（只动 index/工作树，不碰 .git/shallow 与 HEAD）。
 Convert-PackagedGitToShallow $Checkout $Repo

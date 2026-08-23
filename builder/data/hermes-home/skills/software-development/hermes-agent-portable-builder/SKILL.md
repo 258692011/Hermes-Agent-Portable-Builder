@@ -53,11 +53,30 @@ How to record:
 Before every build, sync `upstream/` to exactly mirror `origin/main`:
 
 ```powershell
-git -C <builder-root>\upstream fetch --prune origin
+git -C <builder-root>\upstream fetch --depth 1 --no-tags origin main
 git -C <builder-root>\upstream reset --hard origin/main
 ```
 
-`upstream/` is a read-only 官方源码. `reset --hard` guarantees a byte-exact mirror. The build script will apply and remove its own portable patch; unrelated local modifications must not survive.
+`upstream/` is a read-only 官方源码 — a **depth-1 SHALLOW mirror since
+2026-08-23** (in-place conversion: `.git` 1.2GB+ → 69MB; the rest of the
+working tree is tracked source plus build caches like `node_modules`).
+`reset --hard` guarantees a byte-exact mirror. The build script will apply
+and remove its own portable patch; unrelated local modifications must not
+survive.
+
+The mirror is shallow because the build never needs history or tags (no
+`git describe`/`rev-list`/`--tags` anywhere in `Hermes.ps1`), and
+`Convert-PackagedGitToShallow` already shallow-fetches FROM this mirror — a
+shallow source is fully compatible with it (the packaged conversion
+sequence is unchanged). Conversion recipe (verified 2026-08-23 in place):
+`git fetch --depth 1 --no-tags origin main` → `git reset --hard origin/main`
+→ `git remote remove origin` + re-add by URL (drops every origin/* ref that
+keeps old history reachable — ~1600 branch refs and version/backup tags
+must go before gc can prune) → delete ALL local tags (`for-each-ref
+refs/tags ... | xargs git tag -d`) → `git reflog expire --expire=now --all`
+→ `git gc --prune=now --aggressive`. KEEP the shallow flags on every sync:
+a plain `git fetch --prune origin` would fetch every branch at full depth
+and silently bloat the mirror again.
 
 ## Build Trigger Rule (user-controlled)
 

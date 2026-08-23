@@ -1,0 +1,16 @@
+# Build outputs
+/stage/
+/dist/
+/builder/logs/
+
+# Regenerable offline caches — Hermes.ps1 back-fills / restores them on demand
+# (uv, PortableGit, node, python, 7zip, electron/npm caches)
+/builder/assets/
+
+# Read-only upstream mirror (its own git repo — never tracked here)
+/upstream/
+
+# Windows junk
+Thumbs.db
+Desktop.ini
+*.tmp

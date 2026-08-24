@@ -26,8 +26,6 @@ Appendices (merged from the former one-file-per-topic layout):
 - Appendix: Windows PowerShell native commands
 - Appendix: Update.exe error dialog
 
-
-
 ## Upstream build
 
 Install workspace dependencies from the repository root; the Desktop scripts explicitly check the root workspace installation.
@@ -328,23 +326,11 @@ hermes-desktop-onboarded-v1
 hermes-onboarding-skipped-v1
 ```
 
-If either arrives via `Local Storage/leveldb`, a newly extracted package can skip the provider onboarding overlay even though upstream still ships it. Verify fresh onboarding only from an empty writable data root. A useful acceptance check is to launch a disposable extraction with `--remote-debugging-port=<PORT>`, connect through CDP, evaluate `document.body.innerText`, and assert expected localized copy such as the setup heading, recommended provider label, other-provider option, API-key option, and choose-later option. Stop the fixture, delete it, sanitize the unlaunched packaging tree, then archive. Static inventory of the final archive must show no Electron payload and no forbidden backend state.
+If either arrives via `Local Storage/leveldb`, a newly extracted package can skip the provider onboarding overlay even though upstream still ships it. Verify fresh onboarding only from an empty writable data root (launch a disposable extraction with `--remote-debugging-port=<PORT>`, evaluate `document.body.innerText` via CDP, assert expected localized copy, then stop/delete the fixture and sanitize the packaging tree before archiving).
 
 ## End-to-end acceptance sequence
 
-1. Run Desktop typecheck and lint.
-2. Run directly relevant Electron backend/path tests.
-3. Build `win-unpacked` with native `node-pty` staged for win32-x64.
-4. Run a component verifier for Hermes, Python imports, Node/npm, Git/Bash, and uv.
-5. Launch Desktop and confirm one embedded Python backend owns a loopback listening port.
-6. Rename/move the entire root and repeat component verification plus Desktop/backend readiness.
-7. Stop all Portable processes and exercise update/repair from the moved root; verify dependencies, interruption-marker cleanup, commit/version, and Desktop readiness.
-8. Create the ZIP.
-9. Extract the ZIP into a fresh differently named directory and repeat readiness.
-10. Exercise the shipped updater from that extracted layout when an upstream delta or controlled repair fixture is available.
-11. Compute SHA-256 only after the final rebuild, then read it back and compare to the manifest.
-
-A full platform test suite may contain upstream POSIX fixture failures on Windows (for example, tests expecting `/venv/lib/pythonX.Y/site-packages`). Report those honestly, then run focused Windows/backend tests; do not convert a partial suite failure into a blanket pass.
+The full sequence (Desktop typecheck/lint → win-unpacked build with native node-pty staged for win32-x64 → component verifier for Hermes/Python/Node/Git/uv → launch and confirm one embedded Python backend owns a loopback port → move the root and repeat → stop processes and exercise update/repair from the moved root → ZIP → extract into a fresh differently named directory and repeat readiness → exercise the shipped updater with a real delta or fixture → regenerate checksum after the final rebuild) is captured in the main skill's Verification section — follow that. One note unique to this audit: a full platform test suite may contain upstream POSIX fixture failures on Windows (for example, tests expecting `/venv/lib/pythonX.Y/site-packages`). Report those honestly, then run focused Windows/backend tests; do not convert a partial suite failure into a blanket pass.
 
 ## External Builder-owned release templates and contract gate
 
@@ -352,7 +338,7 @@ A full platform test suite may contain upstream POSIX fixture failures on Window
 
 - `source/hermes-cli.cmd` — pointer-only CLI launcher; never hard-codes a CPython patch directory.
 - `scripts/Update-Portable.ps1` — the merged patch/update helper (single script, `-Stage Patch|PatchRemove|SyncDesktop|WriteDesktopStamp`): the Patch/PatchRemove stages apply/remove the marker-bounded Desktop source patch (build-time `-RepoPath`, deployed `-PortableRoot`); the SyncDesktop stage rebuilds Desktop/TUI/Web and atomically swaps `app`; `WriteDesktopStamp` records the pristine desktop content hash on the build machine. Python provisioning — parsing the embedded 源码的 current `scripts/install.ps1` `$PythonVersion`, passing it to `uv python install/find`, validating major/minor, rebuilding the venv, and updating `current.txt` transactionally — lives in the standalone `scripts/Repair-Portable.ps1` (`-UpdatePython`), which became the self-contained repair entry when the `Repair` stage was split out of `Update-Portable.ps1` (2026-08-10).
-- `source/README.txt` — release README template; the public CLI path is `runtime\\bin\\hermes-cli.cmd` and there is no root `Hermes-CLI.exe`.
+- `source/README.txt` — release README template; the public CLI path is `runtime\bin\hermes-cli.cmd` and there is no root `Hermes-CLI.exe`.
 - `Hermes.ps1` embeds the two release gates as in-script functions (merged into the build script 2026-08-10): `Test-PortablePythonContract` rejects a mismatched Python selector/runtime, hard-coded launcher directory, obsolete root CLI executable, or stale README path, and enforces the MCP import regression probe; `Test-PortableNoEditableInstall` rejects non-relocatable editable metadata (`__editable__*`, `*.egg-link`) and build-root absolute paths in `.pth` files.
 
 At assembly time (Hermes.ps1), render the README metadata placeholders from the actual 源码 and runtime probes, copy these templates into the staged tree, omit `Hermes-CLI.exe`, then run the two contract gates (now in-process):
@@ -365,6 +351,8 @@ Invoke-NativeChecked 'Portable non-editable install contract test' { Test-Portab
 Do not archive unless both gates succeed.
 
 ## Critical pitfalls
+
+The full, maintained pitfall list lives in the main skill's Pitfalls section. The audit-level summary:
 
 - Do not treat `pack` success as backend bundling proof.
 - Redirect both Hermes state and Electron `userData`.
@@ -380,95 +368,45 @@ Do not archive unless both gates succeed.
 
 # Appendix: Desktop patch line endings (merged from apply-desktop-patch-line-endings.md)
 
-## Patch stage CRLF 误报因果链与修复选项
+## Patch stage CRLF 误报因果链与修复（2026-08-03 排障，方案 A 已实现并验证）
 
-> 本文档记录的是 2026-08-03 的排障过程。相关逻辑位于 `builder/scripts/Update-Portable.ps1 -Stage Patch`。
+相关逻辑位于 `builder/scripts/Update-Portable.ps1 -Stage Patch`。
 
-Session: 2026-08-03 (upstream sync 5b5932886 → d0b87dad7)。根因已实证；方案 A 已获用户批准并**实现、验证通过**（见下文）。
+### 症状与诊断
 
-### 症状
-
-- `upstream/` 的 `git status` 显示 3 个文件 modified：
-  `apps/desktop/electron/main.ts`, `zoom.ts`, `zoom.test.ts`
-- 但 `git diff HEAD --numstat` 为空 → **内容零差异，纯行尾符噪音**
-
-### 诊断命令（实测输出）
+- `upstream/` 的 `git status` 显示 3 个文件 modified：`apps/desktop/electron/main.ts`, `zoom.ts`, `zoom.test.ts`，但 `git diff HEAD --numstat` 为空 → **内容零差异，纯行尾符噪音**。
+- 诊断命令（实测输出）：
 
 ```bash
-git rev-parse --is-shallow-repository        # false — upstream 是全量历史，不是浅克隆
-git diff HEAD --numstat                      # 空 → 无内容差异
-git config --show-origin core.autocrlf       # file:.../hermes-home/git/etc/gitconfig → true（全局）
+git config --show-origin core.autocrlf       # 全局 → true（hermes-home 便携 git）
 git check-attr eol text -- apps/desktop/electron/main.ts   # unspecified
-# 官方 .gitattributes 只强制 *.sh / Dockerfile / *.dockerfile 为 LF；.ts 未覆盖 → 完全受 autocrlf 支配
+# 官方 .gitattributes 只强制 *.sh / Dockerfile 为 LF；.ts 未覆盖 → 完全受 autocrlf 支配
 ```
 
-### 因果链
+### 因果链（要点）
 
-1. **构建流程**（Hermes.ps1）：打补丁 `Update-Portable.ps1 -Stage Patch -RepoPath $Repo`
-   → 桌面构建 → finally 里 `-Stage PatchRemove` 移除补丁。
-2. 补丁脚本每次读取 3 个文件都**无条件 CRLF→LF**（`[IO.File]::ReadAllText(...).Replace("`r`n", "`n")`，第 63–65 行），
-   所有写回都用 `WriteAllText($path, $text, [UTF8Encoding]::new($false))`（第 147/151/155/173/246/263/266/284 行）→ 写 LF。
-3. 补丁内容重复应用无害（第 180 行 "already applied" 短路），**但行尾转换不具此性质**——即使内容没变，文件也被重写成 LF。
-4. 全局 `core.autocrlf=true`（hermes-home 便携 git 的 gitconfig）下 检出产物是 CRLF；
-   文件被改写成 LF 后 git 判定 "该 CRLF 却是 LF" → status 误报 modified，diff 归一化后为空。
+补丁脚本每次读取 3 个文件都**无条件 CRLF→LF** 再写回（`WriteAllText` UTF-8 no BOM）。补丁内容重复应用无害（"already applied" 短路），**但行尾转换不具此性质**——即使内容没变，文件也被重写成 LF；全局 `core.autocrlf=true` 下检出是 CRLF，git 判定"该 CRLF 却是 LF"→ status 误报 modified。现有 `Refresh-PortableGitIndex` 只在 `-Remove` 分支且 `-PortableRoot` 模式下调用，构建脚本用 `-RepoPath` → 必然跳过，救不了场。
 
-### 为什么现有 `Refresh-PortableGitIndex` 没救场
+### 修复（方案 A，已实现，2026-08-03 用户拍板）
 
-- 函数在第 106–128 行：设 `core.longpaths true` + `core.autocrlf false` + `core.eol lf`，
-  当 staged 干净且 `git diff --ignore-space-at-eol` 干净时执行 `git add --renormalize .` + `git reset --mixed HEAD`。
-- **只在 `-Remove` 分支调用**（第 175 行），apply 正常路径完全不调。
-- 调用时 `Refresh-PortableGitIndex -Skip:(-not $PortableRoot)` —— 构建脚本用 `-RepoPath`（非 `-PortableRoot`）→ 必然跳过。
-- 且该函数按 "ZIP 解压后仓库"（工作区 LF）设计；对 builder 的 upstream（检出为 CRLF）直接跑反而会把全仓库刷成 modified。不能简单改成"每次都跑"。
+写回时还原文件原始 EOL：
 
-### 修复选项（2026-08-03 用户已拍板：方案 A 已实现）
+- 新增 `Read-NormalizedText`：读时检测原始 EOL（含 `\r\n` → CRLF，否则 LF），内容归一化 LF；
+- 新增 `Write-TextWithOriginalEol`：写回前防御性 `Replace("\r\n","\n")`（杜绝 CRCRLF 双重转换），再按原始 EOL 还原；
+- 全部 8 个 `WriteAllText` 写回点换成 `Write-TextWithOriginalEol`；读取点 3 个文件改用 helper，变量名不变 → 后续匹配/插入逻辑零改动。
+- 要点：PS here-string 被 PS 归一化为 LF（不随脚本文件 EOL），插入块匹配不受影响；最终文本已无 `\r`，`Replace("\n","\r\n")` 不会产生 `\r\r\n`。
 
-#### 方案 A（✅ 已实现）：写回时还原文件原始 EOL
+未采用的方案：B（upstream 仓库级 `core.eol=lf` + 全量 checkout——改持久配置、重 clone 需重设）；C（构建 finally 加 `git restore` 三个文件——治标不治本）。
 
-改动（`Update-Portable.ps1 -Stage Patch`）：
-- 新增 `Read-NormalizedText`：读文件时检测原始 EOL（含 `\r\n` → CRLF，否则 LF），内容归一化为 LF 文本；
-- 新增 `Write-TextWithOriginalEol`：写回前先防御性 `Replace("\r\n","\n")`（杜绝 CRCRLF 双重转换），再按原始 EOL 还原；
-- 读取点 3 个文件改用 helper，变量名 `$text`/`$zoomText`/`$zoomTestText` 不变 → 后续所有匹配/插入逻辑零改动；
-- 全部 8 个 `WriteAllText` 写回点（原 147/151/155/173/246/263/266/284 行）换成 `Write-TextWithOriginalEol`。
-- 要点：PS here-string 被 PS 归一化为 LF（不随脚本文件 EOL），故插入块匹配不受影响；
-  最终文本已无 `\r`，`Replace("\n","\r\n")` 不会产生 `\r\r\n`。
-- 效果：构建一轮后 3 文件与源码字节级一致 → status 永远干净；不改任何 git 配置，apply/remove、upstream/打包仓库通吃。
+### 通用教训
 
-#### 方案 B（未采用）：upstream 仓库级 `core.eol=lf` + `core.autocrlf=false` + 一次性全量 `git checkout .`
-- 固定整个仓库为 LF，任何工具写 LF 都不误报。
-- 代价：改持久配置；首次全量刷新；重 clone 后需重设（除非写进脚本）。
-
-#### 方案 C（未采用，双保险）：构建脚本 finally 的 patch cleanup 后加
-```powershell
-git -C $Repo restore apps/desktop/electron/main.ts apps/desktop/electron/zoom.ts apps/desktop/electron/zoom.test.ts
-```
-- 重新检出回 CRLF。治标不治本（脚本写 LF 的行为仍在），但 5 分钟改完。
-
-### 实现验证（2026-08-03 实测，upstream 上真实跑 apply→remove 循环）
-
-```bash
-# 1. 语法解析
-powershell -NoProfile -Command '$null = [scriptblock]::Create((Get-Content -Raw "D:\...\Update-Portable.ps1")); "PARSE OK"'
-
-# 2. apply 后（-RepoPath 指向 upstream）
-git status --short        # 3 文件 modified = 真实补丁内容（预期，不是噪音）
-git diff --stat           # 只显示补丁块（main.ts +69/-2 等），无整文件行尾翻转
-python -c "import io; b=io.open(f,'rb').read(); print(b.count(b'\r\n'), b.count(b'\n')-b.count(b'\r\n'))"
-                          # 期望: CRLF=全文行数, bare LF=0 → 行尾与源码一致
-
-# 3. remove 后
-git status --short        # 空 = 字节级还原 → 修复生效
-```
-
-通用教训：**行尾归一化不具"重复无害"性质**——补丁内容可以重复应用（"already applied" 短路），但只要脚本无条件
-CRLF→LF 再写回，即使内容零变化也会弄脏工作区。任何在 Windows 上改写 git 跟踪文件的脚本，
-都应采用"读时检测原始 EOL + 写回还原"模式。
+**行尾归一化不具"重复无害"性质**——任何在 Windows 上改写 git 跟踪文件的脚本，都应采用"读时检测原始 EOL + 写回还原"模式。
 
 ### 验证口径
 
-- 同步后：`git log --oneline -1` = origin/main；`git status --short` 空。
-- 打包产物桌面补丁：查 `app\resources\app.asar.unpacked\dist\electron-main.mjs`
-  （electron-builder 解包主进程；app.asar 内搜不到）。
-- 包内 npm 版本：读 `data\hermes-home\node\node_modules\npm\package.json`。
+- apply 后 `git diff --stat` 只显示补丁块（无整文件行尾翻转）；`python -c` 统计 `\r\n` 数 = 全文行数、bare LF = 0。
+- remove 后 `git status --short` 空 = 字节级还原。
+- 打包产物桌面补丁：查 `app\resources\app.asar.unpacked\dist\electron-main.mjs`（electron-builder 解包主进程；app.asar 内搜不到）。
 
 ---
 
@@ -519,131 +457,40 @@ After runtime verification, stop all processes under the fixture root, empty Ele
 
 ## Durable fix: Hermes-Agent-Portable-Builder ships a working web dashboard
 
-Companion to `portable-install-diagnosis.md`. After the diagnosis (2026-08-04),
-the user's builder project at `D:\Hermes-Agent-Portable-Builder` was modified so
-FUTURE builds ship a working browser dashboard out of the box. Deployed copies in
-the running portable (`D:\Hermes-Agent-Portable`) were synced byte-
-identically and verified live.
+Companion to `Portable install diagnosis` (below). After the 2026-08-04 diagnosis, the builder project was modified so FUTURE builds ship a working browser dashboard out of the box; deployed copies were synced byte-identically and verified live.
 
 ### Design principle
 
-- The desktop app's own spawned backend must keep serving the DESKTOP bundle
-  (its webview injects `window.hermesDesktop`). It spawns via
-  `python -m hermes_cli.main serve` directly (`apps/desktop/electron/main.ts`,
-  never through `hermes-cli.cmd`) — so fixing the launcher only affects
-  standalone/user-invoked dashboards.
+- The desktop app's own spawned backend must keep serving the DESKTOP bundle (its webview injects `window.hermesDesktop`). It spawns via `python -m hermes_cli.main serve` directly (`apps/desktop/electron/main.ts`, never through `hermes-cli.cmd`) — so fixing the launcher only affects standalone/user-invoked dashboards.
 - Fix the STANDALONE path: (1) ship the real web bundle, (2) stop the env leak.
 
-### File-by-file edits
+### Where the fix lives (all implemented)
 
-#### 1. `builder/source/Hermes.ps1`
-
-After the TUI bundle step (`Copy-Item ... 'ui-tui\dist\entry.js' ...`) and BEFORE
-the `package-lock.json` restore guard (one guard then covers BOTH installs):
-
-```powershell
-# Prebuilt Web bundle: stage hermes_cli/web_dist so `hermes dashboard` serves
-# the real browser UI (vite outDir targets ../hermes_cli/web_dist) instead of
-# the Electron desktop bundle, which needs the desktop IPC bridge.
-Invoke-NativeChecked 'Web workspace install' { & npm.cmd install --workspace web --include=dev --silent --no-fund --no-audit --progress=false }
-Push-Location (Join-Path $Repo 'web')
-try {
-    Invoke-NativeChecked 'Web bundle build' { & npm.cmd run build }
-} finally {
-    Pop-Location
-}
-```
-
-CRITICAL: `hermes_cli/web_dist/` is gitignored upstream (`.gitignore` line
-`hermes_cli/web_dist/`), so the staged `git clean -fdx` would DELETE it. Add the
-exclusion to the staged clean:
-
-```powershell
-& git.exe -C $Checkout clean -fdx -e venv/ -e hermes_cli/tui_dist/ -e hermes_cli/web_dist/
-```
-
-#### 2. `builder/scripts/Update-Portable.ps1 -Stage SyncDesktop`
-
-Same web build step after the TUI try/catch block, with the SAME non-fatal
-contract as the TUI bundle: on failure `Remove-TreeBestEffort $webDistDir` +
-`Write-Warning` — a stale bundle risks protocol mismatch, while a missing one
-fails explicitly ("Frontend not built"). Include the same `git checkout --
-package-lock.json` restore guard.
-
-#### 3. `builder/source/hermes-cli.cmd` (core leak fix)
-
-After the PATH line:
-
-```bat
-rem The desktop app sets HERMES_WEB_DIST to its own Electron bundle for its
-rem embedded dashboard. Clear it here so a standalone `hermes dashboard` serves
-rem the shipped hermes_cli\web_dist browser UI instead of the desktop bundle
-rem (which needs the desktop IPC bridge and breaks in a plain browser).
-set "HERMES_WEB_DIST="
-```
-
-Safe because the desktop app never uses the .cmd. `hermes-tui.cmd` is a thin
-wrapper and inherits the clearing (fine — TUI needs no web dist).
-
-#### 4. `builder/scripts/Verify-Portable.ps1`
-
-Add to the `$Checks` inventory hashtable:
-`WebDist = Join-Path $HomeDir 'hermes-agent\hermes_cli\web_dist\index.html'`
-
-#### 5. `builder/source/README.txt`
-
-故障排查 entry for the web dashboard (mention `hermes-cli.cmd dashboard`,
-http://127.0.0.1:9119, and the IPC-bridge error meaning). The DEPLOYED README
-is the RENDERED template (real versions, not `{{PLACEHOLDER}}`) — apply the same
-insertion to it, do NOT copy the template over it.
+1. `builder/source/Hermes.ps1` — web workspace install + build after the TUI bundle step, before the `package-lock.json` restore guard (one guard then covers BOTH installs). CRITICAL: `hermes_cli/web_dist/` is gitignored upstream, so the staged `git clean -fdx` must exclude it: `& git.exe -C $Checkout clean -fdx -e venv/ -e hermes_cli/tui_dist/ -e hermes_cli/web_dist/`.
+2. `builder/scripts/Update-Portable.ps1 -Stage SyncDesktop` — same web build step after the TUI try/catch block, same non-fatal contract (on failure `Remove-TreeBestEffort $webDistDir` + warning — a stale bundle risks protocol mismatch, a missing one fails explicitly "Frontend not built"), same `git checkout -- package-lock.json` restore guard.
+3. `builder/source/hermes-cli.cmd` — core leak fix: `set "HERMES_WEB_DIST="` after the PATH line. Safe because the desktop app never uses the .cmd; `hermes-tui.cmd` inherits the clearing (fine — TUI needs no web dist).
+4. `builder/scripts/Verify-Portable.ps1` — `$Checks.WebDist = Join-Path $HomeDir 'hermes-agent\hermes_cli\web_dist\index.html'`.
+5. `builder/source/README.txt` — 故障排查 entry for the web dashboard. The DEPLOYED README is the RENDERED template (real versions, not `{{PLACEHOLDER}}`) — apply the same insertion to it, do NOT copy the template over it.
 
 ### Sync contract (deployed copies)
 
-`runtime/bin/hermes-cli.cmd`, `scripts/*.ps1` in the running portable must stay
-BYTE-IDENTICAL with the builder sources. Diff first (`cmp`), then copy or apply
-the same targeted edit.
+`runtime/bin/hermes-cli.cmd`, `scripts/*.ps1` in the running portable must stay BYTE-IDENTICAL with the builder sources. Diff first (`cmp`), then copy or apply the same targeted edit.
 
 ### EOL / BOM gotchas (all hit in practice)
 
-- `.ps1` sources are UTF-8 **with BOM** (PowerShell 5.1 needs it for non-ASCII).
-  The text patch tool can STRIP the BOM on some files — check after patching with
-  `head -c 3 file | od -An -tx1` (expect `ef bb bf`) and restore if missing.
-  (Note: Verify-Portable.ps1 was originally BOM-less ASCII — match the file's own
-  original state, don't blindly add BOMs.)
-- `hermes-cli.cmd` must stay CRLF. `write_file` can emit LF-only — rewrite with
-  explicit `\r\n` (python) and verify no lone LF:
-  `python -c "d=open(p,'rb').read(); print(d.replace(b'\r\n',b'').count(b'\n'))"` → 0.
-- The README template contains NUL bytes (read_file reports it as binary) — use
-  byte-level insertion with python (`data.find(anchor)`), not the text patch tool.
-- Validate edited ps1 without running: PowerShell parser —
-  `[System.Management.Automation.Language.Parser]::ParseFile($f,[ref]$t,[ref]$e)`.
-- After `npm install` in a workspace repo, confirm `git status --porcelain` is
-  still empty (npm can rewrite the root lockfile); the build scripts restore it.
+- `.ps1` sources are UTF-8 **with BOM** (PowerShell 5.1 needs it for non-ASCII). The text patch tool can STRIP the BOM on some files — check after patching with `head -c 3 file | od -An -tx1` (expect `ef bb bf`) and restore if missing. (Verify-Portable.ps1 was originally BOM-less ASCII — match the file's own original state, don't blindly add BOMs.)
+- `hermes-cli.cmd` must stay CRLF. `write_file` can emit LF-only — rewrite with explicit `\r\n` (python) and verify no lone LF: `python -c "d=open(p,'rb').read(); print(d.replace(b'\r\n',b'').count(b'\n'))"` → 0.
+- The README template contains NUL bytes (read_file reports it as binary) — use byte-level insertion with python (`data.find(anchor)`), not the text patch tool.
+- Validate edited ps1 without running: PowerShell parser — `[System.Management.Automation.Language.Parser]::ParseFile($f,[ref]$t,[ref]$e)`.
+- After `npm install` in a workspace repo, confirm `git status --porcelain` is still empty (npm can rewrite the root lockfile); the build scripts restore it.
 
 ### Rejected alternative
 
-Python-side patch (make `web_server.py` WEB_DIST resolution HERMES_DESKTOP-aware:
-desktop spawn → desktop bundle, else → shipped web_dist) is more thorough (covers
-direct `python -m hermes_cli.main dashboard` calls) but requires a new
-python-source patch apply/remove/reapply lifecycle — the existing
-The patch stage (`Update-Portable.ps1 -Stage Patch`) only handles Electron files
-(main.ts/zoom.ts/zoom.test.ts) and would need to run after every `hermes update`.
-The `.cmd` change covers the realistic paths with zero upstream patch surface.
+Python-side patch (make `web_server.py` WEB_DIST resolution HERMES_DESKTOP-aware) is more thorough (covers direct `python -m hermes_cli.main dashboard` calls) but requires a new python-source patch apply/remove/reapply lifecycle — the patch stage only handles Electron files and would need to run after every `hermes update`. The `.cmd` change covers the realistic paths with zero upstream patch surface.
 
-### Verified end-to-end (this session)
+### Verified end-to-end
 
-- Exact commands: `npm install --workspace web --include=dev --silent --no-fund
-  --no-audit --progress=false` + `npm run build` → exit 0, ~1s build,
-  `hermes_cli/web_dist/index.html` present; git stays clean.
-- Live test with the FIXED launcher, while `HERMES_WEB_DIST=<desktop bundle>`
-  was still in the shell env and NO manual override: dashboard did NOT print
-  "Using web dist from ...app.asar" → auto-built once → served
-  `__HERMES_SESSION_TOKEN__` + the web bundle hash.
-- Stamp file `<HERMES_HOME>/web-ui-build-stamp.json` created on first build →
-  subsequent starts skip the build (content-hash mechanism in
-  `hermes_cli/main.py::_web_ui_build_needed`, stamp lives OUTSIDE the repo so
-  `git clean` never touches it — but in-repo `web_dist` IS wiped by clean
-  without the `-e` exclusion).
+With the FIXED launcher, while `HERMES_WEB_DIST=<desktop bundle>` was still in the shell env and NO manual override: dashboard did NOT print "Using web dist from ...app.asar" → served `__HERMES_SESSION_TOKEN__` + the web bundle hash. Stamp file `<HERMES_HOME>/web-ui-build-stamp.json` created on first build → subsequent starts skip the build (stamp lives OUTSIDE the repo so `git clean` never touches it — but in-repo `web_dist` IS wiped by clean without the `-e` exclusion).
 
 ---
 
@@ -651,48 +498,15 @@ The `.cmd` change covers the realistic paths with zero upstream patch surface.
 
 ## Portable-install diagnosis: "Desktop IPC bridge is unavailable."
 
-First encounter: 2026-08-04, Hermes Desktop Portable at
-`D:\Hermes-Agent-Portable`. `hermes dashboard` started fine and served
-http://127.0.0.1:9119, but the page (opened in the desktop app's preview pane)
-showed the toast **"Desktop IPC bridge is unavailable."** and the chat was disabled.
-
-### Symptom chain
-
-1. `hermes dashboard --no-open` printed:
-   `Using web dist from HERMES_WEB_DIST: D:\Hermes-Agent-Portable\app\resources\app.asar.unpacked\dist`
-2. The served SPA was the DESKTOP bundle:
-   - `index.html` → `assets/index-B_vYUFp_.js` (desktop build).
-   - That bundle contains boot code (connection hook `cGe` in the minified JS):
-     `let t=window.hermesDesktop; ... if(!t) return Wr("Desktop IPC bridge is unavailable."), We(!1)`
-     — i.e. it hard-fails when the Electron preload bridge is absent.
-   - `window.hermesDesktop` exists only inside the Electron app (preload script
-     `electron-preload.js`). The preview pane / any plain browser lacks it.
-3. The desktop bundle's assets contain NONE of the web-mode globals
-   (`__HERMES_SESSION_TOKEN__`, `__HERMES_AUTH_REQUIRED__`, `__HERMES_BASE_PATH__`,
-   `__HERMES_DASHBOARD_EMBEDDED_CHAT__`). grep across all `assets/*.js` returned
-   nothing — proof it is desktop-only, not dual-mode.
+First encounter: 2026-08-04, Hermes Desktop Portable at `D:\Hermes-Agent-Portable`. `hermes dashboard` started fine and served http://127.0.0.1:9119, but the page (opened in the desktop app's preview pane) showed the toast **"Desktop IPC bridge is unavailable."** and the chat was disabled.
 
 ### Root cause
 
-- The desktop app sets `HERMES_WEB_DIST` to its own `app.asar.unpacked\dist` in
-  its process environment (it spawns dashboard backends and embeds them in a
-  webview that DOES have the bridge).
-- The Hermes terminal tool / bash sessions spawned from the desktop app inherit
-  that variable. `hermes-cli.cmd` itself never sets it (verified by reading the
-  launcher: only HERMES_HOME, AGENT_ROOT, PYTHONPATH, PATH, Python pointer logic).
-- `web_server.py`: `WEB_DIST = Path(os.environ["HERMES_WEB_DIST"]) if "HERMES_WEB_DIST" in os.environ else Path(__file__).parent / "web_dist"` — so the inherited
-  value wins over the default.
-
-### The real web frontend
-
-- Source: `<HERMES_HOME>\hermes-agent\web\` (Vite + React; entry `index.html`,
-  `src/lib/dashboard-flags.ts` declares `window.__HERMES_DASHBOARD_EMBEDDED_CHAT__`).
-- `web/vite.config.ts`: `outDir: "../hermes_cli/web_dist"` — the server's DEFAULT
-  fallback location. No `hermes_cli/web_dist` existed in this install → the web UI
-  had simply never been built.
-- Build: `cd web && npm install && npm run build` (tsc -b && vite build).
-  Portable ships Node at `<HERMES_HOME>\node` (v24). Build took ~45 s total.
-  Output includes `ChatPage-*.js` and `xterm-*.js` chunks (embedded chat).
+- The desktop app sets `HERMES_WEB_DIST` to its own `app.asar.unpacked\dist` in its process environment (it spawns dashboard backends and embeds them in a webview that DOES have the bridge).
+- Hermes terminal tool / bash sessions spawned from the desktop app inherit that variable; `hermes-cli.cmd` itself never sets it.
+- `web_server.py`: `WEB_DIST = Path(os.environ["HERMES_WEB_DIST"]) if "HERMES_WEB_DIST" in os.environ else Path(__file__).parent / "web_dist"` — the inherited value wins over the default.
+- Compounding: the install had no `hermes_cli/web_dist` at all — the web UI had simply never been built (`web/vite.config.ts`: `outDir: "../hermes_cli/web_dist"`, the server's DEFAULT fallback).
+- The DESKTOP bundle hard-fails without the bridge: its boot code checks `window.hermesDesktop` and on absence shows the toast and disables chat; it contains NONE of the web-mode globals (`__HERMES_SESSION_TOKEN__`, `__HERMES_AUTH_REQUIRED__`, `__HERMES_BASE_PATH__`) — desktop-only, not dual-mode. `window.hermesDesktop` exists only inside the Electron app (preload script `electron-preload.js`).
 
 ### Verified fix (exact commands)
 
@@ -707,22 +521,16 @@ curl -s http://127.0.0.1:9119/ | grep -oE '__HERMES_SESSION_TOKEN__|index-[A-Za-
 
 ### Code pointers (web_server.py, 源码)
 
-- `WEB_DIST` resolution: `hermes_cli/web_server.py` (~line 135).
-- SPA bootstrap injection (`__HERMES_SESSION_TOKEN__` etc.) and the
-  `__HERMES_AUTH_REQUIRED__` switch: `_serve_index()` inside `mount_spa()`
-  (~lines 16036-16085). Token never injected when OAuth gate is active.
-- Embedded chat always on: `_DASHBOARD_EMBEDDED_CHAT_ENABLED = True` (~line 355),
-  routes `/api/ws`, `/api/pty`, `/chat`.
-- CORS restricted to localhost origins; auth gate list in
-  `hermes_cli/dashboard_auth/public_paths.py`.
+- `WEB_DIST` resolution: `hermes_cli/web_server.py` (~line 135; line numbers shift — re-grep).
+- SPA bootstrap injection (`__HERMES_SESSION_TOKEN__` etc.) and the `__HERMES_AUTH_REQUIRED__` switch: `_serve_index()` inside `mount_spa()`.
+- Embedded chat always on: `_DASHBOARD_EMBEDDED_CHAT_ENABLED = True`; routes `/api/ws`, `/api/pty`, `/chat`.
+- CORS restricted to localhost origins; auth gate list in `hermes_cli/dashboard_auth/public_paths.py`.
 
 ### Related facts
 
-- Dashboard is a full backend (cron ticker, gateway pub/sub per-channel registry)
-  — not a static server.
+- Dashboard is a full backend (cron ticker, gateway pub/sub per-channel registry) — not a static server.
 - `hermes dashboard --stop` kills it; `--status` reports running processes.
-- The desktop app's own spawned dashboard backend SHOULD keep serving the desktop
-  bundle (its webview injects the bridge) — don't "fix" that path.
+- The desktop app's own spawned dashboard backend SHOULD keep serving the desktop bundle (its webview injects the bridge) — don't "fix" that path.
 
 ---
 
@@ -816,7 +624,7 @@ If a Portable staging history also produced:
 cpython-3.11-windows-x86_64-none
 ```
 
-both can run Python 3.11.15. Prefer the exact canonical uv directory when installer/output evidence confirms it, rebuild the Portable venv against that directory, then remove the alias.
+both can run Python 3.11.15. Prefer the exact canonical uv directory when installer/output evidence confirms it, rebuild the Portable venv against that directory, then remove the alias. (uv may also keep a minor-series JUNCTION pointing at the exact directory — one runtime, not a duplicate; retain the junction when `pyvenv.cfg` references it.)
 
 ### Required acceptance checks
 
@@ -881,10 +689,10 @@ CSC="$WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 - **Two csc compiles of identical source are NOT byte-identical.** The PE
   timestamp (4 bytes at PE-header-offset+8; PE header offset is the uint32
   read from file offset 0x3C — typically 0x88) and the .NET module MVID
-  (16-byte GUID in metadata, ~offset 0x25xx for small exes) change on every
-  build. To prove a recompiled exe matches a deployed one: diff the bytes and
-  confirm every differing offset falls inside those two regions, then mask
-  them and compare — equal after masking means identical logic.
+  (16-byte GUID in metadata) change on every build. To prove a recompiled exe
+  matches a deployed one: diff the bytes and confirm every differing offset
+  falls inside those two regions, then mask them and compare — equal after
+  masking means identical logic.
 - **Searching compiled strings**: method/type names live in metadata as
   UTF-8; user string literals live in the #US heap as UTF-16LE. To verify a
   Chinese message made it into the binary, search for
@@ -903,13 +711,13 @@ CSC="$WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 
 ### Reference
 
-- The `Update.exe error dialog` appendix below (merged into this file from the former `update-exe-error-dialog.md` on 2026-08-10) — full session detail: redesigning
-  `Update.exe` failure dialogs (four dialog shapes, child-output capture via
-  async event handlers without deadlock, network-error classification,
-  diagnostic log), shipping a template change to stage + deployed copies
-  without a full rebuild, the github.com network-outage diagnosis ladder for
-  failed updates, and the git "dubious ownership" fix after a Windows
-  rebuild/SID change.
+- The `Update.exe error dialog` appendix below — full session detail:
+  redesigning `Update.exe` failure dialogs (four dialog shapes,
+  child-output capture via async event handlers without deadlock,
+  network-error classification, diagnostic log), shipping a template change
+  to stage + deployed copies without a full rebuild, the github.com
+  network-outage diagnosis ladder for failed updates, and the git "dubious
+  ownership" fix after a Windows rebuild/SID change.
 
 ---
 
@@ -948,7 +756,9 @@ PowerShell 5.1, and bundled Python children.
 ### Verified fix patterns
 
 #### 1. UTF-8 decode + display (C# / .NET 4.0, e.g. compiled launchers)
+
 At entry, BEFORE spawning any child; restore in `finally`:
+
 ```csharp
 Encoding originalConsole = null;
 try { originalConsole = Console.OutputEncoding; Console.OutputEncoding = Encoding.UTF8; } catch { }
@@ -957,6 +767,7 @@ try { Environment.SetEnvironmentVariable("PYTHONUTF8", "1"); } catch { }
 try { return MainBody(); }
 finally { try { if (originalConsole != null) Console.OutputEncoding = originalConsole; } catch { } }
 ```
+
 - `Console.OutputEncoding = UTF8` affects BOTH the Process decode side and
   the console display side in .NET 4.0 (there is no
   `ProcessStartInfo.StandardOutputEncoding` before .NET 4.5 — do not write
@@ -965,6 +776,7 @@ finally { try { if (originalConsole != null) Console.OutputEncoding = originalCo
   its stdout is a pipe (it otherwise picks the console codepage).
 
 #### 2. Same fix in PowerShell 5.1
+
 ```powershell
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -973,6 +785,7 @@ $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
 ```
 
 #### 3. Emoji tofu — substitute only GBK-encodable glyphs
+
 If a substituted glyph is required (display-only; keep the captured log in
 original Unicode), the target MUST be encodable in GBK or console fonts
 lack it too. Verified candidates on zh-CN: `v`, `[OK]`, `>`, `√` (U+221A).
@@ -980,6 +793,7 @@ NOT GBK-encodable: `✓` U+2713, `✔` U+2714, `»` U+00BB. User may prefer the
 tofu box over any substitution — offer choices, don't assume.
 
 #### 4. Double `WaitForExit()` in async capture
+
 First `WaitForExit()` only guarantees the process handle exited;
 `BeginOutputReadLine`/`BeginErrorReadLine` handlers may still be draining
 on the thread pool, so a failure MessageBox can pop while output keeps
@@ -987,6 +801,7 @@ scrolling. Call a second parameterless `WaitForExit()` before reading the
 captured buffer.
 
 #### 5. Parallel stream capture (no deadlock)
+
 ```powershell
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -994,10 +809,12 @@ $process.WaitForExit()
 $stdout = $stdoutTask.Result
 $stderr = $stderrTask.Result
 ```
+
 or the event-handler pattern with `BeginOutputReadLine`/`BeginErrorReadLine`
 + double `WaitForExit()` (see 4). Never sequential `ReadToEnd()` on both.
 
 #### 6. `Select-Object -First 1` broken-pipe race (PS 5.1)
+
 Collect the full output in a subexpression FIRST, then truncate:
 `(& $exe ... ) | Select-Object -First 1` — this succeeds where
 `& $exe ... | Select-Object -First 1` intermittently returns exit -1.
@@ -1104,11 +921,11 @@ echo "BUILD_EXIT_CODE=${PIPESTATUS[0]}" | tee -a run.log
   `"Where-Object { $_.ExecutablePath -like ... }"` silently corrupts, and a
   syntax check like `-Command "$tokens=$null; $errs=$null; [Parser]::ParseFile(...)"`
   fails with `EmptyPipeElement` because bash already emptied the variables
-  (observed 2026-08-11; the .ps1 itself was fine). The robust fix: write the
+  (observed 2026-08-11, re-paid 2026-08-24; see also the HARD RULE in the
+  main skill's Project Release Contract). The robust fix: write the
   one-liner to a temp `.ps1` file and run `powershell.exe -File <temp>`
   (delete it after), or single-quote the whole `-Command` argument, or avoid
-  `$` variables entirely:
-  `wmic process where "ExecutablePath like '%Hermes%'" get ProcessId,Name,ExecutablePath /FORMAT:LIST` works without `$_`.
+  `$` variables entirely.
 - **MSYS paths are not reliable for native tools** (7za, csc, etc.). Pass
   native `D:\...` paths or cwd-relative paths, not `/d/...`.
 - **CRLF + targeted patch engines**: when editing CRLF `.cmd`/`.ps1`
@@ -1140,6 +957,7 @@ rather than trusting `ls node_modules`.
   dedupes it — so `b'WaitForExit' in exe_bytes` or a metadata string scan
   cannot distinguish one call from two. Load the assembly with reflection and
   count callvirt tokens resolved by name inside the method's IL:
+
   ```powershell
   $asm = [System.Reflection.Assembly]::LoadFile($exePath)
   $m = $asm.GetType('Program').GetMethod('RunCaptured', [Reflection.BindingFlags]'NonPublic,Static')
@@ -1152,6 +970,7 @@ rather than trusting `ls node_modules`.
     }
   }
   ```
+
   Verified 2026-08-10: a "double `WaitForExit()`" fix showed 2 call sites via
   IL while a naive byte scan reported 1. Local variable names never appear in
   metadata at all — do not search for them. Also: two csc compiles of the
@@ -1162,16 +981,9 @@ rather than trusting `ls node_modules`.
   `StandardOutput.ReadToEnd()` (blocks until EOF) BEFORE
   `StandardError.ReadToEnd()` hangs when the child fills the 4KB stderr pipe
   buffer while the parent still blocks on stdout EOF. Fix: start BOTH reads
-  asynchronously, then wait, then take results:
-  ```powershell
-  $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-  $stderrTask = $process.StandardError.ReadToEndAsync()
-  $process.WaitForExit()
-  $stdout = $stdoutTask.Result
-  $stderr = $stderrTask.Result
-  ```
-  (PS 5.1 runs on .NET 4.5+, so `ReadToEndAsync()` exists.) Same fix as the
-  C# `RunCaptured` pattern in the portable builder.
+  asynchronously, then wait, then take results (see the console-output
+  appendix fix 5 for the code). PS 5.1 runs on .NET 4.5+, so
+  `ReadToEndAsync()` exists.
 - **`StartsWith($Root)` process-kill is a prefix-match landmine.** Killing
   "processes under the portable root" with
   `$_.ExecutablePath.StartsWith($Root, OrdinalIgnoreCase)` where `$Root` has
@@ -1179,11 +991,13 @@ rather than trusting `ls node_modules`.
   begins with that root (`...-Portable-Beta\`, `...Portable 2\`). Found in
   BOTH `Repair-Portable.ps1` (then the `Repair` stage of `Update-Portable.ps1`) and the `SyncDesktop` stage of `Update-Portable.ps1`. Fix —
   match the directory boundary:
+
   ```powershell
   $rootPrefix = $Root.TrimEnd('\') + '\'
   $_.ExecutablePath.Equals($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
   $_.ExecutablePath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
   ```
+
   Grep the codebase for other bare `StartsWith($Root)` / `StartsWith(root)`
   uses after fixing one occurrence — the bug class repeats.
 - **Child output encoding: UTF-8 bytes decoded as OEM code page → `?`.** A
@@ -1209,10 +1023,12 @@ rather than trusting `ls node_modules`.
   through and the default port was used — only the space form worked.
   Fix with prefix slicing + delayed expansion (`EnableDelayedExpansion`
   required):
+
   ```cmd
   set "ARG=%~1"
   if /i "!ARG:~0,7!"=="--port=" ( set "PORT=!ARG:~7!" & shift & goto :parse )
   ```
+
   Verify with a throwaway `.cmd` harness that echoes the parsed value
   (`echo RESULT_PORT=!PORT!`), run via `cmd /d /c test.cmd --port=9120` —
   never trust the parsing by eye.
@@ -1230,10 +1046,12 @@ Before claiming a stage is the fresh build: check
 `git status --porcelain` must be empty. Do not salvage an updated stage —
 the build script wipes and recreates it.
 
-### Official repo-owned updater script design (upstream desktop-update.ps1)
+### Official repo-owned updater script design (upstream desktop-update)
 
-Upstream may ship its OWN repo-owned desktop update hand-off script
-(`scripts/desktop-update.ps1`, 429 lines, 2026-08-10) that lives IN the
+Upstream ships its OWN repo-owned desktop update hand-off script
+(`scripts/desktop-update.ps1`, an 11-line COMPAT FORWARDER since 2026-08-18;
+the real logic moved to `scripts/desktop-update/windows.ps1`, 1149 lines —
+the 2026-08-10 entry recorded 429 lines at the old path) that lives IN the
 源码 so every `hermes update` refreshes the code driving the next update
 (the "frozen-binary problem": compiled updaters go stale). When reviewing or
 redesigning a custom updater, its notable patterns are:
@@ -1247,7 +1065,10 @@ redesigning a custom updater, its notable patterns are:
   boot so the user SEES how a detached update ended.
 - **One automatic retry** of `hermes update` when it fails (exit code not 0
   and not the "close all windows" code 2) — the boundary class where new
-  code is on disk but old code runs in memory.
+  code is on disk but old code runs in memory. NOTE: retry was REMOVED from
+  the Portable Update.cs on 2026-08-15 at the user's request (retrying does
+  not fix real failures such as the cryptography DLL lock; it only doubles
+  the wait).
 - **Detecting upstream's "fake success"**: official `hermes update` treats a
   Desktop GUI build failure as non-fatal (prints a warning, exits 0) — a
   desktop-driven updater must grep the output for `Desktop build failed` and
@@ -1271,7 +1092,7 @@ redesigning a custom updater, its notable patterns are:
 A custom Portable updater that already covers some of this (external-install
 protection via `HERMES_DESKTOP_CHILD_PID`, atomic app swap with rollback,
 Python-selector following) can still borrow the FAIL CLOSED gate, result-file
-hand-off, retry-once, and fake-success detection.
+hand-off, and fake-success detection.
 
 ### Verification
 
@@ -1311,12 +1132,14 @@ a timing race, so the failure rate depends on how fast the native tool
 flushes (uv 0.12.0 `python find --managed-python`: 2/3 failures).
 
 **Fix:** collect the full output in a subexpression first, then truncate:
+
 ```powershell
 # BAD  — race
 $out = & $exe python find 3.11 --managed-python | Select-Object -First 1
 # GOOD — stable (verified 5/5)
 $out = (& $exe python find 3.11 --managed-python) | Select-Object -First 1
 ```
+
 `| Out-Host`, `| Out-Null`, `| Out-String` consume all output, so they are
 safe — the race is specific to early-terminating selectors like
 `Select-Object -First 1`.
@@ -1341,6 +1164,7 @@ stderr aborts the script at the first such line.
 
 **Fix:** wrap every native invocation in a checked helper that relaxes EAP
 and judges success purely by `$LASTEXITCODE`:
+
 ```powershell
 function Invoke-NativeChecked {
     param([string]$What, [scriptblock]$Script, [switch]$AllowFailure)
@@ -1353,6 +1177,7 @@ function Invoke-NativeChecked {
     $output
 }
 ```
+
 Do NOT use `2>&1` inside the captured scriptblock — it merges stderr
 ErrorRecords into the captured output and pollutes return values. A
 `-AllowFailure` switch returns `$null` on nonzero exit for commands whose
@@ -1366,6 +1191,7 @@ every agent/user terminal it spawns. A build script that does NOT sanitize
 inherited env may resolve the wrong runtime (the live app's python, whose
 DLLs are locked). Sanitize at script start, then re-set to the script's own
 paths right before each native call:
+
 ```powershell
 foreach ($v in 'UV_PYTHON_INSTALL_DIR','UV_PYTHON_INSTALL_BIN','UV_PYTHON_INSTALL_REGISTRY') {
     if (Test-Path "Env:$v") { Write-Host "Sanitizing leaked $v=$([Environment]::GetEnvironmentVariable($v))"; Remove-Item "Env:$v" }
@@ -1402,10 +1228,13 @@ as word-boundary/escape sequences instead of literal backslashes. Verified
 2026-08-11: `grep -E 'runtime\\bin\\...'` matched only `hermes-tui.cmd` while
 missing `hermes-cli.cmd`/`hermes-dashboard.cmd`; a re-run of the same pattern
 against the same saved listing returned 0 — intermittent, not deterministic.
+
 **Reliable alternatives (all verified):**
+
 - `grep -F 'runtime\bin\hermes-cli.cmd'` — fixed-string match, no regex layer;
 - match the basename token only, without the directory: `grep -iE 'hermes-(cli|tui|dashboard)\.cmd'`;
 - let `.` match the separator: `grep -Ec 'runtime.bin'` (5 hits, includes dir entry).
+
 `7za l` output itself uses single backslashes and ends lines with `$` (no CR
 in the redirected file — use `cat -A` to confirm before debugging).
 
@@ -1420,6 +1249,7 @@ file ]` can even pass while the file was never written.
 
 **Fix:** loop with `Invoke-WebRequest -UseBasicParsing -TimeoutSec 300`
 (not curl) and validate the saved file size:
+
 ```powershell
 for ($i = 1; $i -le 10 -and -not $ok; $i++) {
     try {
@@ -1429,6 +1259,7 @@ for ($i = 1; $i -le 10 -and -not $ok; $i++) {
     } catch { Start-Sleep -Seconds 8 }
 }
 ```
+
 PowerShell's downloader proved more resilient than git-bash curl on the
 same flaky endpoint in practice (2026-08-07: curl loop 0/8, IWR loop 1/10
 with 58.9 MB saved). Back off between attempts (5-8s) and keep the size
@@ -1440,11 +1271,11 @@ In `Hermes.ps1` (2026-08-08) the retry contract is unified:
 retries 3x with a 5s pause (same shape as the git clone / PortableGit /
 7-Zip sites), and `-ReturnContent` returns the response body (used for the
 Node.js version-index page). ALL builder download sites now use it: git
-clone (own loop), PortableGit, 7-Zip extra+7zr, uv zip + sha256, Node.js
-index + zip. uv/Node were previously bare one-shot `Invoke-WebRequest`
-calls — a single network blip aborted the whole build. Do not reintroduce
-bare downloads; keep the size floor on new download sites where a known
-archive size exists.
+clone (own loop), PortableGit, 7-Zip extra+7zr, uv zip, Node.js index + zip.
+(uv's separate `.sha256` fetch/verify path was removed 2026-08-09 — the
+archive's own CRC fails corrupt downloads at extraction, HTTPS + 3x retry
+covers transient failures.) Do not reintroduce bare downloads; keep the size
+floor on new download sites where a known archive size exists.
 
 ### Debugging recipe for "works manually, fails in script"
 
@@ -1465,10 +1296,8 @@ archive size exists.
 ### Related
 
 - GitHub / git connectivity diagnosis (network-outage ladder, retry
-  strategy): see the `github-connectivity-diagnostics` skill.
-- Project-specific detail (Hermes Portable Builder scripts, exact line
-  numbers, 2026-08 case study): the `hermes-agent-portable-builder` skill's
-  Pitfalls section.
+  strategy, hosts-pinning): see the "Network-resilient upstream sync"
+  pitfall in the main skill's Pitfalls section.
 
 ---
 
@@ -1485,68 +1314,29 @@ the network-diagnosis ladder.
 
 ### 1. Failure dialog redesign (builder\source\Update.cs)
 
-Four dialog shapes, all title "Hermes Update":
+Four dialog shapes, all title "Hermes Update" (all implemented in Update.cs):
 
-1. **hermes update failed** (Error icon):
-   `更新失败：无法完成官方 Hermes 更新（退出码 N）。\n\n` +
-   `ClassifyUpdateError(output)` + `\n\n详细日志：<diagLog>`
-2. **Step failure** (Error icon) via `Fail(step, rc, message, output, diagLog)`:
-   `更新失败：<step>（退出码 N）。\n\n<message>\n\n详细日志：<diagLog>`
-   (steps: 进程占用 / 防重入 / 便携环境修复 / 移除便携补丁 / 更新 Python 运行时 / 桌面同步;
-   the two fail-closed gates pass `rc=0` because no child command ran — the
-   step name carries the meaning, no "失败" suffix is appended by the template)
-3. **Update OK but auto-launch failed** (Warning icon): `更新已完成，但无法
-   自动启动 Hermes：\n<ex>\n\n请手动启动 Hermes.exe。`
+1. **hermes update failed** (Error icon): `更新失败：无法完成官方 Hermes 更新（退出码 N）。\n\n` + `ClassifyUpdateError(output)` + `\n\n详细日志：<diagLog>`
+2. **Step failure** (Error icon) via `Fail(step, rc, message, output, diagLog)`: `更新失败：<step>（退出码 N）。\n\n<message>\n\n详细日志：<diagLog>` (steps: 进程占用 / 防重入 / 便携环境修复 / 移除便携补丁 / 更新 Python 运行时 / 桌面同步; note the fail-closed gates pass `rc=0` because no child command ran — the step name carries the meaning)
+3. **Update OK but auto-launch failed** (Warning icon): `更新已完成，但无法自动启动 Hermes：\n<ex>\n\n请手动启动 Hermes.exe。`
 4. **Uncaught exception** (Error icon): `更新失败：发生未预期的错误。\n\n<ex>\n\n详细日志：<diagLog>`
 
-`diagLog` = `data\hermes-home\logs\Update.exe-diagnostic.log`, written at start
-with a timestamp header; on failure `AppendDiag` appends step, exit code, and
-the child's full output. Every dialog prints the log path so the user can
-escalate.
+`diagLog` = `data\hermes-home\logs\Update.exe-diagnostic.log`, written at start with a timestamp header; on failure `AppendDiag` appends step, exit code, and the child's full output. Every dialog prints the log path so the user can escalate.
 
 #### Error classification (ClassifyUpdateError) — order matters
 
-- **Network** (checked first): `network error`, `failed to connect`, `could
-  not connect`, `recv failure`, `connection was reset`, `unable to access`,
-  `timed out`, `timeout` → "无法连接到 GitHub（网络错误）… 检查网络或代理后
-  重新运行 Update.exe。更新流程是安全的，重复重试不会损坏现有安装。"
+- **Network** (checked first): `network error`, `failed to connect`, `could not connect`, `recv failure`, `connection was reset`, `unable to access`, `timed out`, `timeout` → "无法连接到 GitHub（网络错误）… 检查网络或代理后重新运行 Update.exe。更新流程是安全的，重复重试不会损坏现有安装。"
 - **DNS**: `could not resolve host`, `name resolution`, `dns`
-- **Blocked**: `authentication`, `permission denied`, `access denied`,
-  ` 403`, ` 401` (note leading space to avoid substring false hits)
+- **Blocked**: `authentication`, `permission denied`, `access denied`, ` 403`, ` 401` (note leading space to avoid substring false hits)
 - **Fallback**: first 6 non-empty output lines, labelled 输出摘要
 
 ### 2. RunCaptured: capture + live stream without deadlock
 
-Replace `Run()` (which returned only the exit code) with a capture variant:
-
-```csharp
-var sb = new StringBuilder();
-var psi = new ProcessStartInfo { FileName = file, Arguments = args,
-    WorkingDirectory = cwd, UseShellExecute = false,
-    RedirectStandardOutput = true, RedirectStandardError = true,
-    CreateNoWindow = false };
-using (var p = Process.Start(psi))
-{
-    p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
-    { if (e.Data != null) { lock (sb) { sb.AppendLine(e.Data); } Console.WriteLine(e.Data); } };
-    p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
-    { if (e.Data != null) { lock (sb) { sb.AppendLine(e.Data); } Console.Error.WriteLine(e.Data); } };
-    p.BeginOutputReadLine();
-    p.BeginErrorReadLine();
-    p.WaitForExit();
-    output = sb.ToString();
-    return p.ExitCode;
-}
-```
-
-Never `ReadToEnd()` before `WaitForExit()` on redirected streams — that
-deadlocks when the buffer fills. Async handlers + WaitForExit is the safe
-pattern. `lock(sb)` because the two event threads append concurrently.
+Replace `Run()` (which returned only the exit code) with a capture variant (async event handlers + `WaitForExit`, `lock(sb)` because the two event threads append concurrently; never `ReadToEnd()` before `WaitForExit()` — that deadlocks when the buffer fills). The current `RunCaptured` additionally has a double `WaitForExit()` and a `silent` overload (see the main skill's Pitfalls — Update.cs/console-launcher entries).
 
 ### 3. Byte-verification recipe (prove deployed == recompiled)
 
-csc output is non-deterministic: the PE timestamp and the .NET module MVID
-(16-byte GUID) change per compile. Verified on 2026-08-06:
+csc output is non-deterministic: the PE timestamp and the .NET module MVID (16-byte GUID) change per compile. Verified on 2026-08-06:
 
 ```python
 import struct
@@ -1559,56 +1349,32 @@ non_ts = [d for d in diffs if d not in ts and d not in mvid_range]
 assert not non_ts                                  # only timestamp+MVID differ
 ```
 
-Observed: 18 differing bytes total — 2 at 136–137 (PE header area) and 16 at
-9604–9619 (MVID). After masking those, files are byte-identical. NOTE: the
-`@9604` MVID offset is per-build; locate it by diffing rather than hard-coding.
+Observed: 18 differing bytes total — 2 at 136–137 (PE header area) and 16 at 9604–9619 (MVID). After masking those, files are byte-identical. NOTE: the MVID offset is per-build; locate it by diffing rather than hard-coding.
 
 #### String-encoding gotcha when verifying compiled messages
 
-- Method/type names → metadata, stored UTF-8. `b'ClassifyUpdateError' in data`
-  works.
-- String literals → #US heap, stored UTF-16LE. Chinese dialog text must be
-  searched as `'无法连接到 GitHub'.encode('utf-16-le')`.
-- A single `[Text.Encoding]::Unicode.GetString(bytes)` scan finds literals but
-  misses method names; PowerShell console mojibake can also hide hits — use
-  Python for byte-level checks.
+- Method/type names → metadata, stored UTF-8. `b'ClassifyUpdateError' in data` works.
+- String literals → #US heap, stored UTF-16LE. Chinese dialog text must be searched as `'无法连接到 GitHub'.encode('utf-16-le')`.
+- A single `[Text.Encoding]::Unicode.GetString(bytes)` scan finds literals but misses method names; PowerShell console mojibake can also hide hits — use Python for byte-level checks.
 
 ### 4. Shipping a template change without a full rebuild
 
 Propagate to ALL copies in one pass (verified 2026-08-06):
 
-1. Edit `builder\source\Update.cs`; re-save UTF-8 **with BOM**
-   (`[IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($true))`).
+1. Edit `builder\source\Update.cs`; re-save UTF-8 **with BOM** (`[IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($true))`).
 2. Compile stage: `/out:D:\Hermes-Agent-Portable-Builder\stage\...\Update.exe`
-3. Compile deployed: `/out:D:\Hermes-Agent-Portable\Update.exe`
-   (same csc line incl. `/win32icon:<repo>\apps\desktop\assets\icon.ico`).
-4. Re-render README.txt everywhere from `builder\source\README.txt` with
-   the same `{{VAR}}` substitution the build uses — extract the current
-   variable values (version/commit/electron/python/node/git/uv) from an
-   existing rendered README via regex, then substitute into the template and
-   write UTF-8 no-BOM, preserving line endings.
+3. Compile deployed: `/out:D:\Hermes-Agent-Portable\Update.exe` (same csc line incl. `/win32icon:<repo>\apps\desktop\assets\icon.ico`).
+4. Re-render README.txt everywhere from `builder\source\README.txt` with the same `{{VAR}}` substitution the build uses — extract the current variable values (version/commit/electron/python/node/git/uv) from an existing rendered README via regex, then substitute into the template and write UTF-8 no-BOM, preserving line endings.
 5. Old dist ZIPs keep the old behavior until the next full build (expected).
 
 ### 5. github.com network-outage diagnosis ladder
 
-Symptom: `hermes update` dies at "Fetching updates..." with
-`Failed to connect to github.com:443 after ~21000 ms`.
+Symptom: `hermes update` dies at "Fetching updates..." with `Failed to connect to github.com:443 after ~21000 ms`.
 
-1. `git remote -v` → confirm the official URL. **Do not trust the rendered
-   error text**: Hermes wraps bare URLs as `@url:`https://…`` display-layer
-   link syntax; the real URL in `logs\update.log` was the standard one. Not a
-   config bug.
-2. Preconditions for a safe re-run: `git status --porcelain` empty,
-   `git stash list` empty, no patch markers in desktop sources, venv import
-   OK. Remove stale `data\hermes-home\state-snapshots\*-pre-update` dirs left
-   by failed runs.
-3. Probe: `git ls-remote --heads origin main` ×5; `curl -sI https://github.com`
-   (21s timeout / HTTP 000 = unreachable); controls: `curl -sI
-   https://api.github.com` + a local site (baidu.com). api.github.com and
-   local sites reachable while github.com:443 times out ⇒ transient
-   github.com-main-domain outage. Retry later or via proxy; no config change.
-4. Update.exe is idempotent; repeated failed runs leave only stale
-   `state-snapshots` dirs to clean.
+1. `git remote -v` → confirm the official URL. **Do not trust the rendered error text**: Hermes wraps bare URLs as `@url:https://…` display-layer link syntax; the real URL in `logs\update.log` was the standard one. Not a config bug.
+2. Preconditions for a safe re-run: `git status --porcelain` empty, `git stash list` empty, no patch markers in desktop sources, venv import OK. Remove stale `data\hermes-home\state-snapshots\*-pre-update` dirs left by failed runs.
+3. Probe: `git ls-remote --heads origin main` ×5; `curl -sI https://github.com` (21s timeout / HTTP 000 = unreachable); controls: `curl -sI https://api.github.com` + a local site (baidu.com). api.github.com and local sites reachable while github.com:443 times out ⇒ transient github.com-main-domain outage. Retry later or via proxy; no config change. (For DNS-edge pinning, see the main skill's "Network-resilient upstream sync" pitfall.)
+4. Update.exe is idempotent; repeated failed runs leave only stale `state-snapshots` dirs to clean.
 
 ### 6. git "dubious ownership" after a Windows rebuild/SID change
 

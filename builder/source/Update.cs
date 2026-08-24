@@ -120,6 +120,13 @@ internal static class Program
             foreach (string required in new[] { updater, repair, cli })
                 if (!File.Exists(required)) throw new FileNotFoundException("Required updater component was not found.", required);
 
+            // Clear stale partial git downloads left by a PREVIOUS failed or
+            // killed fetch. git itself does not clean orphaned tmp_pack_* (they
+            // are ignored by the next fetch but pile up on disk, e.g. hundreds
+            // of MB after repeated failures). Cleaning before every attempt means
+            // at most one leftover ever exists, so disk cannot accumulate.
+            CleanStaleTmpPacks(root);
+
             string output;
             int rc = RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(repair) + " -KeepProcesses", root, out output);
             if (rc != 0) return Fail("便携环境修复", rc, "便携 Python 环境修复失败，无法继续更新。", output, diagLog);
@@ -219,6 +226,15 @@ internal static class Program
                 }
                 if (rc != 0)
                 {
+                    // The official `hermes update` may have cold-started its own
+                    // gateway (venv python) before failing. Leave it running and it
+                    // becomes an orphan that blocks the NEXT update's process gate
+                    // (WaitForRootProcessesExit waits 30s -> "Hermes 仍在运行").
+                    // The preflight already guaranteed no user Hermes was running,
+                    // so the only Hermes/python under this root now is the one the
+                    // update itself started: stop it BEFORE the failure dialog so no
+                    // orphan is left behind and a re-run passes the gate instantly.
+                    StopPortableProcesses(root);
                     MessageBox.Show(
                         "更新失败：无法完成官方 Hermes 更新（退出码 " + rc + "）。\n\n" +
                         ClassifyUpdateError(output) +
@@ -255,6 +271,13 @@ internal static class Program
         catch (Exception ex)
         {
             try { AppendDiag(diagLog, "未捕获异常", 1, ex.ToString()); } catch { }
+            // Same defensive cleanup as the handled-failure path: an unhandled
+            // exception could leave the gateway `hermes update` cold-started
+            // behind, and an orphan would block the next update's process gate.
+            // StopPortableProcesses itself never throws (internally try/catch'd),
+            // so a direct call is safe; the preflight already guaranteed no user
+            // Hermes was running, so nothing the user owns is killed.
+            StopPortableProcesses(root);
             MessageBox.Show("更新失败：发生未预期的错误。\n\n" + ex.Message + "\n\n详细日志：" + diagLog,
                 "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return Finish(1, ex.Message);
@@ -318,7 +341,10 @@ internal static class Program
     {
         string script = "const https=require('https');const t=setTimeout(()=>{console.log('PROBE_TIMEOUT');process.exit(0)},6000);https.get('https://github.com/',r=>{clearTimeout(t);console.log('PROBE_OK '+r.statusCode);process.exit(0)}).on('error',e=>{clearTimeout(t);console.log('PROBE_ERR '+(e.code||e.message));process.exit(0)})";
         string output;
-        RunCaptured(nodeExe, "-e \"" + script + "\"", workDir, out output);
+        // Silent: the node probe's stdout (PROBE_OK/PROBE_ERR/PROBE_TIMEOUT) is
+        // internal — only the RESULT matters (proceed vs network-error dialog).
+        // Relaying it to the update console just adds noise.
+        RunCaptured(nodeExe, "-e \"" + script + "\"", workDir, true, out output);
         string line = null;
         if (output != null)
         {
@@ -516,6 +542,26 @@ internal static class Program
                         "Stop-Process -Force";
             string ignored;
             RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"" + ps + "\"", root, out ignored);
+        }
+        catch { }
+    }
+
+    private static void CleanStaleTmpPacks(string root)
+    {
+        // A failed/killed `git fetch` leaves orphaned tmp_pack_* partial pack
+        // files in the repo's .git\objects\pack. git ignores them on the next
+        // fetch (never errors), but never deletes them either, so repeated
+        // failures pile up gigabytes of junk. Best-effort delete every
+        // tmp_pack_*; real pack-*.pack files are never touched. Nothing here
+        // throws (all guarded), and it needs no git binary.
+        try
+        {
+            string packDir = Path.Combine(root, "data", "hermes-home", "hermes-agent", ".git", "objects", "pack");
+            if (!Directory.Exists(packDir)) return;
+            foreach (string file in Directory.GetFiles(packDir, "tmp_pack_*"))
+            {
+                try { File.Delete(file); } catch { }
+            }
         }
         catch { }
     }

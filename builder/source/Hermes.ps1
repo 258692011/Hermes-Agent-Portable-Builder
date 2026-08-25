@@ -1094,5 +1094,17 @@ if ($SkipArchive) {
         Invoke-NativeChecked 'ZIP creation' { & $sevenZip a -tzip $zip 'Hermes-Agent-Portable' }
     } finally { Pop-Location }
     if (-not (Test-Path $zip)) { throw 'ZIP creation failed.' }
-    Write-Host "Portable release built: $zip"
+    # Verify the archive is complete before declaring success (a killed 7za
+    # leaves a truncated zip that `a` reports as success — same guard as the
+    # DeepSeek builder, adopted 2026-08-26).
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $sevenZip t $zip | Out-Null
+        $testCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
+    if ($testCode -ne 0) { throw "Archive integrity check failed (exit $testCode)." }
+    Write-Host "Portable release built and verified: $zip"
 }

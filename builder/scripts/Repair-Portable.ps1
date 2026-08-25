@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$KeepProcesses,
     [switch]$UpdatePython,
     [switch]$ShowOfficialPythonVersion

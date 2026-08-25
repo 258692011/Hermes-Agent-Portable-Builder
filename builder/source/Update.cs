@@ -539,9 +539,28 @@ internal static class Program
             // path cannot act as a wildcard either.
             string ps = "Get-Process Hermes,python -ErrorAction SilentlyContinue | " +
                         "Where-Object { $_.Path.StartsWith('" + safeRoot + "\\', [System.StringComparison]::OrdinalIgnoreCase) } | " +
-                        "Stop-Process -Force";
-            string ignored;
-            RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"" + ps + "\"", root, out ignored);
+                        "Select-Object -ExpandProperty Id";
+            string pidList;
+            RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"" + ps + "\"", root, true, out pidList);
+            // Kill each matched process AND its whole subtree (taskkill /T):
+            // a bare Stop-Process leaves orphaned grandchildren (backend
+            // children, git/uv workers, shells) alive holding files — the
+            // same stale-process lock class as the DeepSeek builder's
+            // KillTree (adopted 2026-08-26). /T /F is the reliable tree kill.
+            foreach (string raw in (pidList ?? "").Split('\n'))
+            {
+                string line = raw.Trim();
+                int pid;
+                if (int.TryParse(line, out pid) && pid > 0)
+                {
+                    try
+                    {
+                        string ignored;
+                        RunCaptured("taskkill.exe", "/PID " + pid + " /T /F", root, true, out ignored);
+                    }
+                    catch { }
+                }
+            }
         }
         catch { }
     }

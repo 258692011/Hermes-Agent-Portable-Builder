@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)][ValidateSet('Patch', 'PatchRemove', 'SyncDesktop', 'WriteDesktopStamp')][string]$Stage,
     # Patch / PatchRemove stages (RepoPath = build-time mode; PortableRoot = deployed mode)
     [string]$PortableRoot = '',

@@ -110,13 +110,15 @@ Assert-WindowsX64
 function Assert-Upstream {
     # The build consumes the official source checkout under upstream/.
     # If the folder is missing or empty, clone it from the official
-    # repository. upstream MUST keep full history: the staged checkout's
-    # `reset --hard $commit` and the packaged shallow-clone fetch (L592) both
-    # resolve objects from this mirror, and the release gate diffs against it.
-    # The SHIPPED .git is made shallow separately (Convert-PackagedGitToShallow,
-    # L945) — upstream itself stays full so those steps always have complete
-    # objects. Non-empty non-git folders and incomplete snapshots are reported
-    # with an English error and are never deleted automatically.
+    # repository. NOTE (2026-08-23): upstream/ is now a depth-1 SHALLOW mirror
+    # of origin/main (fetch --depth 1 --no-tags + reset --hard origin/main;
+    # .git ~69MB instead of 1.2GB+) — the packaged shallow-clone fetch (L595)
+    # and the release gates all resolve objects from this shallow tip, and
+    # official `hermes update` preserves the shallow boundary (update_cmd.py
+    # depth_args). Keep the shallow flags on every sync: a plain fetch would
+    # silently deepen the mirror again. Non-empty non-git folders and
+    # incomplete snapshots are reported with an English error and are never
+    # deleted automatically.
     $officialRepo = 'https://github.com/NousResearch/hermes-agent.git'
     $upstreamExists = Test-Path -LiteralPath $Repo
     $gitDir = Join-Path $Repo '.git'
@@ -138,7 +140,11 @@ function Assert-Upstream {
                     Remove-Item -LiteralPath $Repo -Recurse -Force -ErrorAction SilentlyContinue
                 }
                 Write-Host "Cloning official Hermes source into $Repo (attempt $attempt/3)..."
-                & git.exe clone $officialRepo $Repo 2>&1 | Out-Host
+                # Shallow clone to match the mirror policy (2026-08-23): the
+                # synced upstream is depth-1; a full clone here would silently
+                # reintroduce 1.2GB+ of history. --no-tags avoids pulling the
+                # version/backup tag set; --branch main pins the default branch.
+                & git.exe clone --depth 1 --no-tags --branch main $officialRepo $Repo 2>&1 | Out-Host
                 $cloneCode = $LASTEXITCODE
             } finally {
                 $ErrorActionPreference = $oldEap

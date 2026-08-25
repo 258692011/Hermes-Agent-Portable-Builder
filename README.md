@@ -151,7 +151,7 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 
 构建器会用 `builder\scripts\Update-Portable.ps1 -Stage Patch` 对 `upstream\` 的官方 Desktop 源码临时打补丁：`npm run build`（electron-builder）编译完成后立即用 `-Stage PatchRemove` 还原，源码始终与官方逐字节一致，改动只烙在编译产物（`app\resources\app.asar*`）里。补丁全部是标记包围（`HERMES_PORTABLE_*_BEGIN/END`）、可重复应用、可完整撤销的；撤销后 `git status --porcelain` 必须为空。
 
-### 修改清单（7 项）
+### 修改清单（6 项）
 
 #### 1. 便携路径重定向
 
@@ -189,14 +189,16 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 | 改后 | 断言同步改为 `100` |
 | 效果 | 第 3 项改了默认值后，测试文件若不跟着改，构建窗口期内跑 `npm test` 必挂；改后测试保持通过 |
 
-#### 5. 缩放防重置
+#### 5. 缩放防重置（已退役 2026-08-26）
+
+> 本补丁已移除：在打包应用上实测（Electron 40.10.2 / Chromium 144），上游自带的 `installZoomReassertOnNavigation`（挂在 `did-finish-load` 上，约 675ms）已恢复用户保存的缩放，干净 userData 下 20 秒观察零重置。旧补丁的 250ms 定时器在 `did-finish-load` 之前就触发，效果总被随后的页面加载覆盖，是失效的防御。保留历史说明如下：
 
 | | |
 |---|---|
 | 文件 | `apps/desktop/electron/main.ts` |
-| 改前 | 页面加载完成时应用一次用户保存的缩放：`did-finish-load → restorePersistedZoomLevel(win)` |
-| 改后 | 加载完成后先应用一次，再延迟 250ms 重读保存值、再应用一次 |
-| 效果 | Chromium 内核在打包应用首次加载后可能把缩放悄悄重置回 100%，导致用户设置丢失；第二次应用（250ms 后）确保用户看到的还是自己保存的缩放 |
+| 改前（已移除） | 官方只在导航/窗口事件时恢复缩放：`installZoomReassertOnWindowEvents(win, reassertZoom)` + `installZoomReassertOnNavigation(win.webContents, reassertZoom)`（后者挂在 `did-finish-load`/`did-navigate-in-page` 上） |
+| 改后（已移除） | 曾追加延迟 250ms 重读保存值、再应用一次：`setTimeout(() => restorePersistedZoomLevel(win), 250)` |
+| 效果 | 上游 `did-finish-load` reassert 已覆盖首次加载恢复（#48658/#38854/#79863），无需额外延迟恢复 |
 
 #### 6. 语言种子（兜底）
 

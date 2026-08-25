@@ -145,7 +145,7 @@ function Apply-PortablePatch {
     $backendPatch2End = '// HERMES_PORTABLE_BACKEND_2_END'
     $backendNeedle1 = '  const command = IS_WINDOWS && fileExists(venvPython) ? venvPython : python'
     $backendNeedle2 = '  const command = fileExists(venvPython) ? venvPython : findSystemPython()'
-    # 7th portable patch: default translucency OFF, DRIFT-PROOF. The official
+    # 6th portable patch: default translucency OFF, DRIFT-PROOF. The official
     # per-platform default lines in apps/shared/src/translucency.ts wash out
     # the light-theme UI (NousResearch/hermes-agent#92200; the official
     # per-platform macos/windows split landed later, 2026-08). BOTH the macos
@@ -225,15 +225,15 @@ $backendPatch2End
     $translucencyEol = $translucencyInfo.Eol
     $officialZoom = 'Math.log(0.9) / Math.log(ZOOM_FACTOR_BASE)'
     $portableZoom = 'Math.log(1.0) / Math.log(ZOOM_FACTOR_BASE)'
-    $officialZoomRestore = "win.webContents.on('did-finish-load', () => restorePersistedZoomLevel(win))"
-    $portableZoomRestore = @'
-win.webContents.on('did-finish-load', () => {
-      restorePersistedZoomLevel(win)
-      // Chromium can reset zoom to 100% shortly after the first packaged load.
-      // Re-read the user's persisted value once after initialization settles.
-      setTimeout(() => restorePersistedZoomLevel(win), 250)
-    })
-'@.Trim()
+    # NOTE (2026-08-26): the delayed zoom-restore patch (250ms setTimeout after
+    # installZoomReassertOnNavigation) was REMOVED. Measured on the packaged app
+    # (Electron 40.10.2 / Chromium 144): upstream's own did-finish-load reassert
+    # (installZoomReassertOnNavigation, ~675ms) restores the persisted level and
+    # no reset occurs in 20s of clean-userData observation. The old 250ms timer
+    # fired BEFORE did-finish-load, so its effect was always overwritten by the
+    # page load; it was dead defense against a bug upstream already fixed
+    # (#48658/#38854/#79863). Keeping it would only add a needle that future
+    # upstream refactors can break (it already did once, 2026-08-26).
 
     function Refresh-PortableGitIndex {
         param([switch]$Skip)
@@ -282,10 +282,6 @@ win.webContents.on('did-finish-load', () => {
             $zoomText = $zoomText.Replace($portableZoom, $officialZoom)
             Write-TextWithOriginalEol $Zoom $zoomText $zoomEol
         }
-        if ($text.Contains($portableZoomRestore)) {
-            $text = $text.Replace($portableZoomRestore, $officialZoomRestore)
-            Write-TextWithOriginalEol $Main $text $mainEol
-        }
         $portableTestBlock = @'
 test('default zoom matches the Portable Appearance 100% preset', () => {
   assert.equal(ZOOM_STEP, 0.1)
@@ -329,7 +325,7 @@ test('default zoom matches the Appearance 90% preset', () => {
         exit 0
     }
 
-    if ($text.Contains($startMarker) -and $text.Contains($portableZoomRestore) -and $zoomText.Contains($portableZoom) -and $translucencyText.Contains($translucencyBegin)) {
+    if ($text.Contains($startMarker) -and $zoomText.Contains($portableZoom) -and $translucencyText.Contains($translucencyBegin)) {
         Write-Host 'Portable Desktop source patch already applied.'
         exit 0
     }
@@ -415,10 +411,6 @@ if (process.platform === 'win32') {
     if (-not $zoomText.Contains($officialZoom) -and -not $zoomText.Contains($portableZoom)) {
         throw 'Portable zoom default insertion point was not found.'
     }
-    if (-not $text.Contains($officialZoomRestore) -and -not $text.Contains($portableZoomRestore)) {
-        throw 'Portable delayed zoom restore insertion point was not found.'
-    }
-    $text = $text.Replace($officialZoomRestore, $portableZoomRestore)
     if (-not $text.Contains($backendPatch1Begin)) {
         if (-not $text.Contains($backendNeedle1)) { throw 'Portable backend patch 1 insertion point was not found.' }
         $text = $text.Replace($backendNeedle1, $backendBlock1)
@@ -448,7 +440,7 @@ test('default zoom matches the Portable Appearance 100% preset', () => {
 '@.Trim()
     $zoomTestText = $zoomTestText.Replace($officialTestBlock, $portableTestBlock)
     Write-TextWithOriginalEol $ZoomTest $zoomTestText $zoomTestEol
-    # 7th patch: translucency defaults -> 0/0, drift-proof — matched by
+    # 6th patch: translucency defaults -> 0/0, drift-proof — matched by
     # structure with ANY official numbers, originals captured in the marker
     # block for exact restore (2026-08-22).
     if (-not $translucencyText.Contains($translucencyBegin)) {
@@ -564,7 +556,9 @@ function Sync-PortableDesktop {
         } else {
             Write-Host 'Desktop source unchanged since the last build; skipping electron-builder rebuild.'
         }
-        # KEEP IN SYNC with Hermes.ps1 Ensure-OfficialNpm (same npm floor logic,\n        # deploy-time vs build-time; 2026-08-22 cross-reference).\n        # npm version follows the official floor (repo package.json engines.npm);
+        # KEEP IN SYNC with Hermes.ps1 Ensure-OfficialNpm (same npm floor logic,
+        # deploy-time vs build-time; 2026-08-22 cross-reference).
+        # npm version follows the official floor (repo package.json engines.npm);
         # the node distribution's bundled npm does not track it. Parse the highest
         # ">=" constraint and upgrade when the packaged npm is below that floor.
         $npmCmd = Join-Path $HermesHome 'node\npm.cmd'

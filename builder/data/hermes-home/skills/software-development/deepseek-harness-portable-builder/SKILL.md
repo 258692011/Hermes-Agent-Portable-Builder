@@ -238,6 +238,18 @@ and silently bloat the mirror again.
   --branch master <official> <repo>`，与镜像策略一致。教训：任何"缺失时
   重建"的提示/命令都必须带上与既定同步策略相同的 shallow 标志，否则会
   静默撑大镜像。
+- **更新完成「是否立即重启」对话框（fixed 2026-08-26）**: 成功路径的 `Close()` 曾**无条件执行**
+  ——点「否」也会关闭更新器窗口（用户要求：是→重启并关闭；否→保持窗口打开）。且成功路径
+  从未释放 `_busy`（点否后按 X 关窗会弹「更新正在进行中…确定要关闭吗？」，与 Hermes updater
+  2026-08-26 同类坑）。修复：`SetBusy(false)` 移到分支之前（按钮随后显式禁用），`Close()` 移进
+  `rr == DialogResult.Yes` 分支内；「否」时窗口保持打开。
+- **重复「检查更新」日志叠加（fixed 2026-08-26）**: Update.cs 的 `CheckForUpdates()`/`RunUpdate()`
+  每次都 `AppendLog` 追加输出，连点两次检查更新会把上一次的结果/输出叠在下面（用户反馈：
+  日志会叠加）。修复：每次开始新的检查/更新时先 `_txtLog.Clear()`——`CheckForUpdates` 在
+  `SetStatus("正在检查更新...")` 之后、`RunUpdate` 在 busy 守卫之后各加一行。两个方法都在
+  UI 线程执行（点击 / `BeginInvoke`），直接 Clear 无竞态：按钮 busy 期间禁用，前一轮输出在
+  完成回调（UI 线程）中已全部落盘，不存在排队中的 Append 追尾。Hermes updater 2026-08-26
+  同类修复。
 
 ## Launcher (DeepSeek-Harness.cs) contract
 
@@ -407,6 +419,16 @@ portable, so the shipped copy is generated, not hand-synced. After a build,
 verify the stage copy is byte-identical: `diff` the builder copy against
 `stage\DeepSeek-Harness-Portable\data\dsh\skills\...\SKILL.md` — a divergence
 here means a build shipped stale skill text.
+
+**Ordering contract: update the skill BEFORE building/packaging** (observed
+2026-08-26: a lesson was written back to the skill AFTER the ZIP was
+archived, so the shipped skill was stale). The build's `Copy-Tree` runs at
+mid-build; a skill edited after that copy never reaches the artifact unless
+you re-sync manually. Sequence for any skill change that must ship:
+(1) patch the builder copy, (2) verify the stage copy is byte-identical or
+`cp` it over, (3) only then archive. After archiving, verify the ZIP's
+extracted SKILL.md md5 equals the builder copy — do not assume the archive
+picked up the edit.
 
 If this skill is ever installed into an agent profile (e.g. the dsh
 portable's own embedded agent maintaining its builder from inside the

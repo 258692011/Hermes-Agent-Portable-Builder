@@ -674,6 +674,20 @@ internal static class Program
                 log("⚠ site-packages 副本创建失败（robocopy exit " + copyRc + "），按原样更新。");
             }
         }
+        // Checkout repair before the official update (observed 2026-08-26): a
+        // stale detached/dirty state - a previous failed update left a
+        // half-applied merge (working tree = old HEAD + partial new content)
+        // - makes the official updater stash, pull into a no-op and report
+        // "Code did not move ... (detached checkout)", failing the whole chain.
+        // Reattach to the branch and discard tree changes: the packaged source
+        // is a build artifact, and the desktop patch was already removed by the
+        // earlier PatchRemove step. reset --hard HEAD does not move the branch,
+        // so headBefore (RunGitHead) stays valid for the uv-fallback proof.
+        string co;
+        RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " reset --hard HEAD", root, true, out co);
+        int attachRc = RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " checkout main", root, true, out co);
+        if (attachRc != 0)
+            RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " checkout -B main HEAD", root, true, out co);
         // hermes-cli.cmd already wraps `python -m hermes_cli.main %*`, so
         // pass the bare subcommand; a redundant "-m hermes_cli.main" only
         // works by accident (it parses as --model + parse_known_args).

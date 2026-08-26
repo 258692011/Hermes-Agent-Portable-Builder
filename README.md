@@ -191,7 +191,7 @@ Hermes 的"推理强度"（模型选项）共 7 档（内部阶梯 `EFFORT_LADDE
 
 #### 5. 缩放防重置（已退役 2026-08-26）
 
-> 本补丁已移除：在打包应用上实测（Electron 40.10.2 / Chromium 144），上游自带的 `installZoomReassertOnNavigation`（挂在 `did-finish-load` 上，约 675ms）已恢复用户保存的缩放，干净 userData 下 20 秒观察零重置。旧补丁的 250ms 定时器在 `did-finish-load` 之前就触发，效果总被随后的页面加载覆盖，是失效的防御。保留历史说明如下：
+> 本补丁已移除：在打包应用上实测（Electron 40.10.2 / Chromium 144），上游自带的 `installZoomReassertOnNavigation`（挂在 `did-finish-load` 上，约 675ms）已恢复用户保存的缩放，干净 userData 下 20 秒观察零重置。旧补丁的 250ms 定时器在 `did-finish-load` 之前就触发，效果总被随后的页面加载覆盖，是失效的防御（若未来确需防御性延迟恢复，正确值应在 `did-finish-load` 之后，如 1000ms）。保留历史说明如下：
 
 | | |
 |---|---|

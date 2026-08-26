@@ -3,7 +3,7 @@ setlocal
 set "ROOT=%~dp0..\.."
 set "HERMES_HOME=%ROOT%\data\hermes-home"
 set "AGENT_ROOT=%HERMES_HOME%\hermes-agent"
-set "HERMES_PORTABLE_SITE_PACKAGES=%AGENT_ROOT%\venv\Lib\site-packages"
+if not defined HERMES_PORTABLE_SITE_PACKAGES set "HERMES_PORTABLE_SITE_PACKAGES=%AGENT_ROOT%\venv\Lib\site-packages"
 set "PYTHONPATH=%ROOT%\runtime\python-bootstrap;%AGENT_ROOT%;%PYTHONPATH%"
 set "HERMES_GIT_BASH_PATH=%HERMES_HOME%\git\bin\bash.exe"
 set "UV_PYTHON_INSTALL_DIR=%ROOT%\runtime\python"

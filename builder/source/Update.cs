@@ -590,10 +590,17 @@ internal static class Program
 
         int rc;
         log("→ 便携环境修复...");
-        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(repair) + " -KeepProcesses", root, log);
+        // Spawn maintenance scripts via -Command with a UTF-8 console preamble,
+        // NOT -File: a child PowerShell 5.1 decodes native stdout (npm, vite,
+        // electron-builder all emit UTF-8) using its own Console.OutputEncoding
+        // = OEM codepage (GBK/936 on zh-CN), so multibyte glyphs (checkmark,
+        // box-drawing) arrive corrupted ("?" pairs) before Update.exe's UTF-8
+        // decode sees them. Setting the encoding in the child first fixes the
+        // streamed log and the diag log. Same wrapper as the build-log rule.
+        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; & '" + repair.Replace("'", "''") + "' -KeepProcesses\"", root, log);
         if (rc != 0) return Fail("便携环境修复", rc, "便携 Python 环境修复失败，无法继续更新。", "", diagLog);
         log("→ 移除便携源码补丁...");
-        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(updater) + " -Stage PatchRemove", root, log);
+        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; & '" + updater.Replace("'", "''") + "' -Stage PatchRemove\"", root, log);
         if (rc != 0) return Fail("移除便携补丁", rc, "移除 Portable 源码补丁失败，无法继续更新。", "", diagLog);
         // Stray non-gitignored untracked files in the packaged checkout
         // (e.g. desktop sources from a newer upstream that leaked in)
@@ -640,11 +647,46 @@ internal static class Program
         // step failed (e.g. network) — continuing would report a fake
         // success with un-updated source.
         string headBefore = RunGitHead(gitBin, checkoutDir, root);
+        // SELF-LOCK guard for the official update's dependency phase (2026-08-26):
+        // hermes update runs from the runtime python with the venv site-packages on
+        // its import path (HERMES_PORTABLE_SITE_PACKAGES + python-bootstrap
+        // sitecustomize), so compiled packages the app imports - openai -> jiter,
+        // pydantic-core - are LOADED by the update process itself and uv cannot
+        // remove the loaded .pyd (os error 5, 拒绝访问; observed on jiter).
+        // StopPortableProcesses cannot help here (you cannot kill yourself).
+        // Redirect the update process to a THROWAWAY COPY of the site-packages so
+        // uv only mutates files nothing has loaded. hermes-cli.cmd now respects a
+        // pre-set HERMES_PORTABLE_SITE_PACKAGES (default unchanged when unset).
+        string sp = Path.Combine(root, "data", "hermes-home", "hermes-agent", "venv", "Lib", "site-packages");
+        string spCopy = sp + ".update-copy";
+        string savedSp = Environment.GetEnvironmentVariable("HERMES_PORTABLE_SITE_PACKAGES");
+        bool spRedirected = false;
+        if (Directory.Exists(sp))
+        {
+            string ignored;
+            int copyRc = RunCaptured("robocopy.exe", "\"" + sp + "\" \"" + spCopy + "\" /MIR /MT:16 /NFL /NDL /NJH /NJS /NP /R:1 /W:1", root, true, out ignored);
+            if (copyRc >= 0 && copyRc < 8)
+            {
+                try { Environment.SetEnvironmentVariable("HERMES_PORTABLE_SITE_PACKAGES", spCopy); spRedirected = true; log("→ 更新进程使用 site-packages 副本（防 .pyd 自锁）..."); } catch { }
+            }
+            else
+            {
+                log("⚠ site-packages 副本创建失败（robocopy exit " + copyRc + "），按原样更新。");
+            }
+        }
         // hermes-cli.cmd already wraps `python -m hermes_cli.main %*`, so
         // pass the bare subcommand; a redundant "-m hermes_cli.main" only
         // works by accident (it parses as --model + parse_known_args).
         log("→ 官方更新 (hermes update)...");
         rc = RunStreaming(cli, "update", root, log);
+        if (spRedirected)
+        {
+            try { Environment.SetEnvironmentVariable("HERMES_PORTABLE_SITE_PACKAGES", savedSp); } catch { }
+            // The update process has exited, releasing its loaded .pyd files; a
+            // cold-started gateway may still hold the copy - best-effort delete,
+            // the next update's cleanup retries after StopPortableProcesses.
+            try { if (Directory.Exists(spCopy)) Directory.Delete(spCopy, true); } catch { }
+        }
         if (rc != 0)
         {
             AppendDiag(diagLog, "官方更新 (hermes update)", rc, "");
@@ -716,10 +758,10 @@ internal static class Program
         // venv directory — a stray child holding it would fail that step.
         StopPortableProcesses(root);
         log("→ 更新 Python 运行时...");
-        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(repair) + " -UpdatePython -KeepProcesses", root, log);
+        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; & '" + repair.Replace("'", "''") + "' -UpdatePython -KeepProcesses\"", root, log);
         if (rc != 0) return Fail("更新 Python 运行时", rc, "按官方选择器更新 Python 失败，现有版本不受影响。", "", diagLog);
         log("→ 桌面同步...");
-        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(updater) + " -Stage SyncDesktop", root, log);
+        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; & '" + updater.Replace("'", "''") + "' -Stage SyncDesktop\"", root, log);
         if (rc != 0) return Fail("桌面同步", rc, "Portable 桌面应用同步失败，现有版本不受影响。", "", diagLog);
         // No completion dialog: launch the app directly. Step 5 (desktop
         // sync) already killed the root processes; start Hermes.exe fresh.
@@ -978,6 +1020,7 @@ internal static class Program
                         SetStatus("更新失败：" + e.Error.Message);
                         AppendLog("update error: " + e.Error);
                         try { File.AppendAllText(_diagLog, "update error: " + e.Error + "\r\n"); } catch { }
+                        SetBusy(false);
                     }
                     else
                     {
@@ -985,18 +1028,21 @@ internal static class Program
                         if (rc == 0)
                         {
                             SetStatus("更新完成");
+                            // Release the busy flag BEFORE Close(): OnFormClosing
+                            // pops a busy-confirmation dialog whenever _busy is
+                            // true, so the old order (Close() then SetBusy(false))
+                            // showed it after every successful update.
+                            SetBusy(false);
                             _btnCheck.Enabled = false;
                             _btnUpdate.Enabled = false;
-                            // Ask before closing: the app was relaunched by the
-                            // chain; keep the window so the log stays readable.
                             Close();
                         }
                         else
                         {
                             SetStatus("更新失败（退出码 " + rc + "），见日志与诊断文件。");
+                            SetBusy(false);
                         }
                     }
-                    SetBusy(false);
                 }
                 catch (Exception ex) { try { File.AppendAllText(_diagLog, "update completion: " + ex + "\r\n"); } catch { } }
             };

@@ -277,6 +277,8 @@ EmbeddedCheckoutIsOfficialOnly: true
 4. `runtime\bin\hermes-cli.cmd --version` 等入口正常；`hermes-dashboard.cmd` 启动后 `http://127.0.0.1:9119` 可达（默认端口）
 5. 内嵌官方源码与 upstream 逐字节一致（无补丁残留）；`data\hermes-home` 内嵌 checkout `git status` 干净
 6. 发行 ZIP 内不含 `data\hermes-home\config.yaml`；`7za t` 完整性 OK；`data\` 只含预置内容
+7. Update.exe 为窗口版：运行 `Update.exe --check`，窗口出现（标题 "Hermes Portable Update"）且自动执行一次检查（`.git\FETCH_HEAD` mtime 更新）；4 秒后进程仍存活（窗口构建无崩溃），随后关闭——残留 `.hermes-update-in-progress` 标记带 PID 校验，下次运行自动忽略
+8. 无头端到端更新链（在便携包副本上做，别动正式包）：复制 `data\hermes-home\hermes-agent` 到临时目录 → 删除 `venv` → 用 `data\hermes-home\bin\uv.exe pip install --python <venv python> -e .` 重建 → 退出码 0 且 `hermes-cli.cmd --version` 正常
 
 ## 升级策略
 
@@ -284,9 +286,10 @@ Hermes 是活跃开发项目、迭代频繁。升级分两种情况：
 
 ① 原地更新（推荐，不需重建）
 
-- 双击包根目录的 `Update.exe`：先做 github.com 网络预检（包内 node 探测，6 秒超时，网络不通秒级报原因且不做任何改动），再官方 `hermes update`（git 拉取 + 依赖安装）+ 便携环境修复 + 桌面同步（`Update-Portable.ps1 -Stage SyncDesktop`），失败输出自动分类（网络/DNS/权限）
+- 双击包根目录的 `Update.exe`：打开更新窗口（当前版本/最新版本 + 实时日志 + "检查更新"/"立即更新"按钮）。"检查更新"调用官方 `hermes update --check`（只 fetch 不安装）；"立即更新"先做 github.com 网络预检（包内 node 探测，6 秒超时，网络不通秒级报原因且不做任何改动），再官方 `hermes update`（git 拉取 + 依赖安装）+ 便携环境修复 + 桌面同步（`Update-Portable.ps1 -Stage SyncDesktop`），步骤输出实时流式显示在窗口日志框，失败自动分类（网络/DNS/权限）。`--check` 参数（托盘/命令行入口）打开窗口并自动执行一次检查
 - 只更新源码/依赖/桌面端，用户数据 `data\hermes-home\` 原样保留；官方更新前自动停止本包进程（释放 cryptography DLL 锁与 venv 目录锁）并清理补丁
 - Desktop/TUI/Web 按 stamp 增量判断，源码没动就跳过对应重建
+- 失败在窗口内显示；诊断日志：`data\hermes-home\logs\Update.exe-diagnostic.log`（每次运行追加，含各步骤退出码与输出）
 - 注意：此方式不换 Python/Node 运行时版本，也不更新启动器/图标/入口脚本
 
 ② 重新构建（当更新超出 Hermes 本身时）

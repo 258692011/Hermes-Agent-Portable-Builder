@@ -1,7 +1,11 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 internal static class Program
@@ -15,10 +19,15 @@ internal static class Program
     private static string s_markerPath;
     private static string s_resultPath;
     private static bool s_ownsMarker;
+    private static bool s_checkOnly;
 
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
+        // --check (launcher tray "检查更新"): open the window and run one
+        // check on load without touching anything. Read-only — never claims
+        // the re-entrancy marker (adopted from the DeepSeek updater).
+        s_checkOnly = args != null && Array.IndexOf(args, "--check") >= 0;
         // The child processes we stream (npm/node, git, powershell, python)
         // emit UTF-8, but .NET 4.0 decodes redirected child output with
         // Console.OutputEncoding — the OEM code page (GBK/936 on zh-CN) — so
@@ -59,10 +68,11 @@ internal static class Program
             // updaters racing over the same checkout/venv bricks the install.
             // We claim the marker with OUR pid; a stale marker whose pid is no
             // longer alive is reclaimed silently. The marker file is only
-            // removed by Finish() when we still own it.
+            // removed by Finish() when we still own it. --check never claims
+            // (read-only), so a tray check works while an update is running.
             try
             {
-                if (File.Exists(s_markerPath))
+                if (!s_checkOnly && File.Exists(s_markerPath))
                 {
                     int oldPid = 0;
                     bool oldAlive = false;
@@ -78,195 +88,24 @@ internal static class Program
                             "", diagLog);
                     }
                 }
-                File.WriteAllText(s_markerPath, Process.GetCurrentProcess().Id.ToString());
-                s_ownsMarker = true;
+                if (!s_checkOnly)
+                {
+                    File.WriteAllText(s_markerPath, Process.GetCurrentProcess().Id.ToString());
+                    s_ownsMarker = true;
+                }
             }
             catch { }
 
-            // FAIL CLOSED gate (learned from official desktop-update.ps1 steps
-            // 1-2): updating while the Desktop backend (venv python) holds the
-            // install open is how installs brick (2026-08-09 Access-denied
-            // incident). Wait up to 30s for a Hermes/backend process under this
-            // root to exit; if it never does, abort BEFORE touching anything.
-            if (!WaitForRootProcessesExit(root, 30))
+            // Window UI: version labels, 检查更新 / 立即更新 buttons, live log.
+            // --check opens the window and runs one check on load; a plain
+            // double-click opens the window idle (user drives the buttons).
+            // The full update chain runs on a background worker so the window
+            // stays responsive and streams progress into the log box.
+            using (var win = new UpdateForm(root, diagLog, s_checkOnly, s_ownsMarker))
             {
-                return Fail("进程占用", 1,
-                    "Hermes 仍在运行（30 秒内未退出）。请完全退出 Hermes 后重新运行 Update.exe。未做任何更改。",
-                    "", diagLog);
+                win.ShowDialog();
             }
-
-            // Pre-flight connectivity probe to github.com (the update source)
-            // through the bundled node — same contract as the DeepSeek
-            // updater's network check (2026-08-22): a dead/flaky link fails in
-            // seconds with a clear reason instead of minutes of git retries,
-            // and nothing local is touched yet.
-            string nodeExe = Path.Combine(root, "data", "hermes-home", "node", "node.exe");
-            if (File.Exists(nodeExe))
-            {
-                string netReason = ProbeGitHub(nodeExe, root);
-                if (netReason != null)
-                {
-                    AppendDiag(diagLog, "网络预检", -1, netReason);
-                    MessageBox.Show("无法开始更新（网络问题）。\n\n" + netReason +
-                        "\n\n建议：检查网络或代理后重新运行 Update.exe。更新流程是安全的，重试不会损坏现有安装。",
-                        "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return Finish(1, "network preflight failed: " + netReason);
-                }
-            }
-
-            string updater = Path.Combine(root, "scripts", "Update-Portable.ps1");
-            string repair = Path.Combine(root, "scripts", "Repair-Portable.ps1");
-            string cli = Path.Combine(root, "runtime", "bin", "hermes-cli.cmd");
-            foreach (string required in new[] { updater, repair, cli })
-                if (!File.Exists(required)) throw new FileNotFoundException("Required updater component was not found.", required);
-
-            // Clear stale partial git downloads left by a PREVIOUS failed or
-            // killed fetch. git itself does not clean orphaned tmp_pack_* (they
-            // are ignored by the next fetch but pile up on disk, e.g. hundreds
-            // of MB after repeated failures). Cleaning before every attempt means
-            // at most one leftover ever exists, so disk cannot accumulate.
-            CleanStaleTmpPacks(root);
-
-            string output;
-            int rc = RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(repair) + " -KeepProcesses", root, out output);
-            if (rc != 0) return Fail("便携环境修复", rc, "便携 Python 环境修复失败，无法继续更新。", output, diagLog);
-            rc = RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(updater) + " -Stage PatchRemove", root, out output);
-            if (rc != 0) return Fail("移除便携补丁", rc, "移除 Portable 源码补丁失败，无法继续更新。", output, diagLog);
-            // Stray non-gitignored untracked files in the packaged checkout
-            // (e.g. desktop sources from a newer upstream that leaked in)
-            // make the official `hermes update` stash them and prompt
-            // "Restore local changes now? [Y/n]"; answering Y then conflicts,
-            // because those files already exist in the updated tree. Clean
-            // them pre-emptively so the official preflight sees a pristine
-            // checkout and resets cleanly. `-fd` leaves gitignored payloads
-            // (hermes_cli/tui_dist, node_modules) untouched. Best-effort: if
-            // it fails, the official flow still works (answer n at its prompt).
-            string gitExe = Path.Combine(root, "data", "hermes-home", "git", "cmd", "git.exe");
-            string gitBin = File.Exists(gitExe) ? gitExe : "git.exe";
-            string checkoutDir = Path.Combine(root, "data", "hermes-home", "hermes-agent");
-            int cleanRc = RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " clean -fd", root, out output);
-            if (cleanRc != 0)
-                Console.WriteLine("WARNING: git clean -fd returned " + cleanRc + "; the update may prompt about local changes.");
-            // The official `hermes update` ends by stopping every running
-            // dashboard/serve process it finds via a command-line match
-            // (wmic CommandLine LIKE %serve%/%dashboard%). On a machine with
-            // several portable installs that also kills the OTHER installs'
-            // backends, which are not stale (they serve their own homes).
-            // The official cleanup honours HERMES_DESKTOP_CHILD_PID (a
-            // comma-separated pid list read from its own environment) — fill
-            // it with the foreign serve/dashboard processes so only this
-            // install's own stale backend is stopped.
-            string foreign = FindForeignDashboardPids(root);
-            if (foreign.Length > 0)
-                Environment.SetEnvironmentVariable("HERMES_DESKTOP_CHILD_PID", foreign);
-            // Stop every Hermes/python process under this install BEFORE the
-            // official update: the Python dependency install rewrites
-            // cryptography's native DLLs (_rust.pyd etc.), and Windows refuses
-            // to replace a DLL that a running Hermes/python process has loaded
-            // (verified 2026-08-15: os error 5 on _rust.pyd — the desktop
-            // backend python.exe loads it, so any update while the app is
-            // running fails the dependency step). The update relaunches the
-            // app afterwards anyway, so nothing is lost. Best-effort: if the
-            // stop fails the update still runs and may hit the lock again.
-            StopPortableProcesses(root);
-            // Record the source commit before the official update so a later
-            // standalone-uv fallback can prove the source actually advanced.
-            // A fallback that succeeds while HEAD is unchanged means the git
-            // step failed (e.g. network) — continuing would report a fake
-            // success with un-updated source.
-            string headBefore = RunGitHead(gitBin, checkoutDir, root);
-            // hermes-cli.cmd already wraps `python -m hermes_cli.main %*`, so
-            // pass the bare subcommand; a redundant "-m hermes_cli.main" only
-            // works by accident (it parses as --model + parse_known_args).
-            rc = RunCaptured(cli, "update", root, out output);
-            if (rc != 0)
-            {
-                AppendDiag(diagLog, "官方更新 (hermes update)", rc, output);
-                // The official update's dependency install can fail because
-                // cryptography's native DLLs (_rust.pyd etc.) are mapped by a
-                // running Hermes/python process — Windows refuses to replace a
-                // loaded DLL (os error 5, verified on the cryptography 48→50
-                // upgrade; the desktop backend python.exe loads _rust.pyd, and
-                // `import hermes_cli.main` itself does NOT load cryptography,
-                // so it is not the update process locking itself — 2026-08-15
-                // reattribution). The update process has exited by now, so a
-                // STANDALONE uv install (Rust process, never loads
-                // cryptography) can finish the deps once the lock is released.
-                // Best-effort: if it succeeds, continue the update; otherwise
-                // fall through to the failure dialog.
-                string uvBin = Path.Combine(root, "data", "hermes-home", "bin", "uv.exe");
-                string repoDir = Path.Combine(root, "data", "hermes-home", "hermes-agent");
-                string venvPython = Path.Combine(repoDir, "venv", "Scripts", "python.exe");
-                if (File.Exists(uvBin) && File.Exists(venvPython))
-                {
-                    Console.WriteLine("官方更新失败（依赖安装），尝试用独立 uv 完成依赖安装...");
-                    int uvRc = RunCaptured(uvBin, "pip install --python \"" + venvPython + "\" -e .", repoDir, out output);
-                    if (uvRc == 0)
-                    {
-                        string headAfter = RunGitHead(gitBin, repoDir, root);
-                        if (headBefore.Length > 0 && headAfter != headBefore)
-                        {
-                            Console.WriteLine("✓ 独立 uv 依赖安装完成，源码已更新。");
-                            rc = 0;
-                        }
-                        else
-                        {
-                            // The git step itself failed (network/conflict) and
-                            // the source did not advance; installing deps alone
-                            // must not report a completed update.
-                            AppendDiag(diagLog, "独立 uv 依赖安装", 0,
-                                "依赖已安装但源码未更新（HEAD 未前进：" + headBefore + "）。");
-                            Console.WriteLine("✗ 依赖已安装，但源码未更新（git 步骤失败）。");
-                        }
-                    }
-                    else
-                    {
-                        AppendDiag(diagLog, "独立 uv 依赖安装", uvRc, output);
-                    }
-                }
-                if (rc != 0)
-                {
-                    // The official `hermes update` may have cold-started its own
-                    // gateway (venv python) before failing. Leave it running and it
-                    // becomes an orphan that blocks the NEXT update's process gate
-                    // (WaitForRootProcessesExit waits 30s -> "Hermes 仍在运行").
-                    // The preflight already guaranteed no user Hermes was running,
-                    // so the only Hermes/python under this root now is the one the
-                    // update itself started: stop it BEFORE the failure dialog so no
-                    // orphan is left behind and a re-run passes the gate instantly.
-                    StopPortableProcesses(root);
-                    MessageBox.Show(
-                        "更新失败：无法完成官方 Hermes 更新（退出码 " + rc + "）。\n\n" +
-                        ClassifyUpdateError(output) +
-                        "\n\n详细日志：" + diagLog,
-                        "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return Finish(rc, "hermes update failed with exit code " + rc);
-                }
-            }
-            // PythonVersion is read only after the official source update, so a
-            // newly changed upstream selector controls provisioning and cutover.
-            // Stop processes again: the official update may have left its own
-            // python children behind, and the venv repair below renames the
-            // venv directory — a stray child holding it would fail that step.
-            StopPortableProcesses(root);
-            rc = RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(repair) + " -UpdatePython -KeepProcesses", root, out output);
-            if (rc != 0) return Fail("更新 Python 运行时", rc, "按官方选择器更新 Python 失败，现有版本不受影响。", output, diagLog);
-            rc = RunCaptured("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(updater) + " -Stage SyncDesktop", root, out output);
-            if (rc != 0) return Fail("桌面同步", rc, "Portable 桌面应用同步失败，现有版本不受影响。", output, diagLog);
-            // No completion dialog: launch the app directly. Step 5 (desktop
-            // sync) already killed the root processes; start Hermes.exe fresh.
-            // Best-effort: if the launch fails, fall back to the informational
-            // dialog so the user is not left wondering why nothing opened.
-            try
-            {
-                Process.Start(Path.Combine(root, "Hermes.exe"));
-            }
-            catch (Exception launchEx)
-            {
-                MessageBox.Show("更新已完成，但无法自动启动 Hermes：\n" + launchEx.Message + "\n\n请手动启动 Hermes.exe。",
-                    "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-            return Finish(0, "Update complete.");
+            return 0;
         }
         catch (Exception ex)
         {
@@ -637,5 +476,545 @@ internal static class Program
             return head == null ? "" : head.Trim();
         }
         catch { return ""; }
+    }
+
+    // ------------------------------------------------------------------ core
+    // Stream a child process, forwarding every stdout/stderr line to onLine in
+    // REAL TIME (async events — never the sequential ReadToEnd pattern, which
+    // deadlocks when the child fills one pipe while the parent blocks on the
+    // other). onLine must be UI-thread-safe (the caller marshals). Returns the
+    // process exit code, or -1 when the process could not be started.
+    private static int RunStreaming(string file, string args, string cwd, Action<string> onLine)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = file,
+                Arguments = args,
+                WorkingDirectory = cwd,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            };
+            using (var p = Process.Start(psi))
+            {
+                var stdoutDone = new System.Threading.ManualResetEvent(false);
+                var stderrDone = new System.Threading.ManualResetEvent(false);
+                Action<string> onData = delegate(string data)
+                {
+                    if (data == null) return;
+                    if (onLine != null) onLine(data);
+                };
+                p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { if (e.Data == null) { stdoutDone.Set(); return; } onData(e.Data); };
+                p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { if (e.Data == null) { stderrDone.Set(); return; } onData(e.Data); };
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+                // No hard timeout: the update chain is long (npm installs can
+                // take minutes on a slow link) and each step has its own
+                // fail-closed gate. The window's Close button cancels via the
+                // BackgroundWorker; a killed Update.exe leaves the child to be
+                // cleaned by the next run's process gate.
+                p.WaitForExit();
+                // .NET 4.0: the first WaitForExit() only guarantees the handle
+                // exited; async events may still drain. A second wait flushes.
+                p.WaitForExit();
+                stdoutDone.WaitOne(2000);
+                stderrDone.WaitOne(2000);
+                return p.ExitCode;
+            }
+        }
+        catch { return -1; }
+    }
+
+    // The FULL update chain (the former MainBody steps), streamed into the
+    // window log. Returns 0 on success; on failure shows a MessageBox with the
+    // classified cause and returns non-zero. Fail-closed gates preserved:
+    // process exit wait, network preflight, per-step exit-code checks, uv
+    // dependency fallback with HEAD-advance proof, orphan cleanup.
+    private static int RunFullUpdate(string root, string diagLog, Action<string> onLog)
+    {
+        Action<string> log = delegate(string line)
+        {
+            try { if (onLog != null) onLog(line); } catch { }
+        };
+
+        // FAIL CLOSED gate (learned from official desktop-update.ps1 steps
+        // 1-2): updating while the Desktop backend (venv python) holds the
+        // install open is how installs brick (2026-08-09 Access-denied
+        // incident). Wait up to 30s for a Hermes/backend process under this
+        // root to exit; if it never does, abort BEFORE touching anything.
+        log("→ 等待 Hermes 进程退出...");
+        if (!WaitForRootProcessesExit(root, 30))
+        {
+            return Fail("进程占用", 1,
+                "Hermes 仍在运行（30 秒内未退出）。请完全退出 Hermes 后重新运行 Update.exe。未做任何更改。",
+                "", diagLog);
+        }
+
+        // Pre-flight connectivity probe to github.com (the update source)
+        // through the bundled node — same contract as the DeepSeek
+        // updater's network check (2026-08-22): a dead/flaky link fails in
+        // seconds with a clear reason instead of minutes of git retries,
+        // and nothing local is touched yet.
+        string nodeExe = Path.Combine(root, "data", "hermes-home", "node", "node.exe");
+        if (File.Exists(nodeExe))
+        {
+            log("→ 网络预检...");
+            string netReason = ProbeGitHub(nodeExe, root);
+            if (netReason != null)
+            {
+                AppendDiag(diagLog, "网络预检", -1, netReason);
+                MessageBox.Show("无法开始更新（网络问题）。\n\n" + netReason +
+                    "\n\n建议：检查网络或代理后重新运行 Update.exe。更新流程是安全的，重试不会损坏现有安装。",
+                    "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return Finish(1, "network preflight failed: " + netReason);
+            }
+        }
+
+        string updater = Path.Combine(root, "scripts", "Update-Portable.ps1");
+        string repair = Path.Combine(root, "scripts", "Repair-Portable.ps1");
+        string cli = Path.Combine(root, "runtime", "bin", "hermes-cli.cmd");
+        foreach (string required in new[] { updater, repair, cli })
+            if (!File.Exists(required)) throw new FileNotFoundException("Required updater component was not found.", required);
+
+        // Clear stale partial git downloads left by a PREVIOUS failed or
+        // killed fetch. git itself does not clean orphaned tmp_pack_* (they
+        // are ignored by the next fetch but pile up on disk, e.g. hundreds
+        // of MB after repeated failures). Cleaning before every attempt means
+        // at most one leftover ever exists, so disk cannot accumulate.
+        CleanStaleTmpPacks(root);
+
+        int rc;
+        log("→ 便携环境修复...");
+        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(repair) + " -KeepProcesses", root, log);
+        if (rc != 0) return Fail("便携环境修复", rc, "便携 Python 环境修复失败，无法继续更新。", "", diagLog);
+        log("→ 移除便携源码补丁...");
+        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(updater) + " -Stage PatchRemove", root, log);
+        if (rc != 0) return Fail("移除便携补丁", rc, "移除 Portable 源码补丁失败，无法继续更新。", "", diagLog);
+        // Stray non-gitignored untracked files in the packaged checkout
+        // (e.g. desktop sources from a newer upstream that leaked in)
+        // make the official `hermes update` stash them and prompt
+        // "Restore local changes now? [Y/n]"; answering Y then conflicts,
+        // because those files already exist in the updated tree. Clean
+        // them pre-emptively so the official preflight sees a pristine
+        // checkout and resets cleanly. `-fd` leaves gitignored payloads
+        // (hermes_cli/tui_dist, node_modules) untouched. Best-effort: if
+        // it fails, the official flow still works (answer n at its prompt).
+        string gitExe = Path.Combine(root, "data", "hermes-home", "git", "cmd", "git.exe");
+        string gitBin = File.Exists(gitExe) ? gitExe : "git.exe";
+        string checkoutDir = Path.Combine(root, "data", "hermes-home", "hermes-agent");
+        log("→ 清理未跟踪文件...");
+        int cleanRc = RunStreaming(gitBin, "-C " + Quote(checkoutDir) + " clean -fd", root, log);
+        if (cleanRc != 0)
+            log("WARNING: git clean -fd returned " + cleanRc + "; the update may prompt about local changes.");
+        // The official `hermes update` ends by stopping every running
+        // dashboard/serve process it finds via a command-line match
+        // (wmic CommandLine LIKE %serve%/%dashboard%). On a machine with
+        // several portable installs that also kills the OTHER installs'
+        // backends, which are not stale (they serve their own homes).
+        // The official cleanup honours HERMES_DESKTOP_CHILD_PID (a
+        // comma-separated pid list read from its own environment) — fill
+        // it with the foreign serve/dashboard processes so only this
+        // install's own stale backend is stopped.
+        string foreign = FindForeignDashboardPids(root);
+        if (foreign.Length > 0)
+            Environment.SetEnvironmentVariable("HERMES_DESKTOP_CHILD_PID", foreign);
+        // Stop every Hermes/python process under this install BEFORE the
+        // official update: the Python dependency install rewrites
+        // cryptography's native DLLs (_rust.pyd etc.), and Windows refuses
+        // to replace a DLL that a running Hermes/python process has loaded
+        // (verified 2026-08-15: os error 5 on _rust.pyd — the desktop
+        // backend python.exe loads it, so any update while the app is
+        // running fails the dependency step). The update relaunches the
+        // app afterwards anyway, so nothing is lost. Best-effort: if the
+        // stop fails the update still runs and may hit the lock again.
+        log("→ 停止本便携目录的 Hermes/python 进程...");
+        StopPortableProcesses(root);
+        // Record the source commit before the official update so a later
+        // standalone-uv fallback can prove the source actually advanced.
+        // A fallback that succeeds while HEAD is unchanged means the git
+        // step failed (e.g. network) — continuing would report a fake
+        // success with un-updated source.
+        string headBefore = RunGitHead(gitBin, checkoutDir, root);
+        // hermes-cli.cmd already wraps `python -m hermes_cli.main %*`, so
+        // pass the bare subcommand; a redundant "-m hermes_cli.main" only
+        // works by accident (it parses as --model + parse_known_args).
+        log("→ 官方更新 (hermes update)...");
+        rc = RunStreaming(cli, "update", root, log);
+        if (rc != 0)
+        {
+            AppendDiag(diagLog, "官方更新 (hermes update)", rc, "");
+            // The official update's dependency install can fail because
+            // cryptography's native DLLs (_rust.pyd etc.) are mapped by a
+            // running Hermes/python process — Windows refuses to replace a
+            // loaded DLL (os error 5, verified on the cryptography 48→50
+            // upgrade; the desktop backend python.exe loads _rust.pyd, and
+            // `import hermes_cli.main` itself does NOT load cryptography,
+            // so it is not the update process locking itself — 2026-08-15
+            // reattribution). The update process has exited by now, so a
+            // STANDALONE uv install (Rust process, never loads
+            // cryptography) can finish the deps once the lock is released.
+            // Best-effort: if it succeeds, continue the update; otherwise
+            // fall through to the failure dialog.
+            string uvBin = Path.Combine(root, "data", "hermes-home", "bin", "uv.exe");
+            string repoDir = Path.Combine(root, "data", "hermes-home", "hermes-agent");
+            string venvPython = Path.Combine(repoDir, "venv", "Scripts", "python.exe");
+            if (File.Exists(uvBin) && File.Exists(venvPython))
+            {
+                log("官方更新失败（依赖安装），尝试用独立 uv 完成依赖安装...");
+                int uvRc = RunStreaming(uvBin, "pip install --python \"" + venvPython + "\" -e .", repoDir, log);
+                if (uvRc == 0)
+                {
+                    string headAfter = RunGitHead(gitBin, repoDir, root);
+                    if (headBefore.Length > 0 && headAfter != headBefore)
+                    {
+                        log("✓ 独立 uv 依赖安装完成，源码已更新。");
+                        rc = 0;
+                    }
+                    else
+                    {
+                        // The git step itself failed (network/conflict) and
+                        // the source did not advance; installing deps alone
+                        // must not report a completed update.
+                        AppendDiag(diagLog, "独立 uv 依赖安装", 0,
+                            "依赖已安装但源码未更新（HEAD 未前进：" + headBefore + "）。");
+                        log("✗ 依赖已安装，但源码未更新（git 步骤失败）。");
+                    }
+                }
+                else
+                {
+                    AppendDiag(diagLog, "独立 uv 依赖安装", uvRc, "");
+                }
+            }
+            if (rc != 0)
+            {
+                // The official `hermes update` may have cold-started its own
+                // gateway (venv python) before failing. Leave it running and it
+                // becomes an orphan that blocks the NEXT update's process gate
+                // (WaitForRootProcessesExit waits 30s -> "Hermes 仍在运行").
+                // The preflight already guaranteed no user Hermes was running,
+                // so the only Hermes/python under this root now is the one the
+                // update itself started: stop it BEFORE the failure dialog so no
+                // orphan is left behind and a re-run passes the gate instantly.
+                StopPortableProcesses(root);
+                MessageBox.Show(
+                    "更新失败：无法完成官方 Hermes 更新（退出码 " + rc + "）。\n\n" +
+                    ClassifyUpdateError("") +
+                    "\n\n详细日志：" + diagLog,
+                    "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return Finish(rc, "hermes update failed with exit code " + rc);
+            }
+        }
+        // PythonVersion is read only after the official source update, so a
+        // newly changed upstream selector controls provisioning and cutover.
+        // Stop processes again: the official update may have left its own
+        // python children behind, and the venv repair below renames the
+        // venv directory — a stray child holding it would fail that step.
+        StopPortableProcesses(root);
+        log("→ 更新 Python 运行时...");
+        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(repair) + " -UpdatePython -KeepProcesses", root, log);
+        if (rc != 0) return Fail("更新 Python 运行时", rc, "按官方选择器更新 Python 失败，现有版本不受影响。", "", diagLog);
+        log("→ 桌面同步...");
+        rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File " + Quote(updater) + " -Stage SyncDesktop", root, log);
+        if (rc != 0) return Fail("桌面同步", rc, "Portable 桌面应用同步失败，现有版本不受影响。", "", diagLog);
+        // No completion dialog: launch the app directly. Step 5 (desktop
+        // sync) already killed the root processes; start Hermes.exe fresh.
+        // Best-effort: if the launch fails, fall back to the informational
+        // dialog so the user is not left wondering why nothing opened.
+        try
+        {
+            Process.Start(Path.Combine(root, "Hermes.exe"));
+        }
+        catch (Exception launchEx)
+        {
+            MessageBox.Show("更新已完成，但无法自动启动 Hermes：\n" + launchEx.Message + "\n\n请手动启动 Hermes.exe。",
+                "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        return Finish(0, "Update complete.");
+    }
+
+    // Read the current Hermes version from the embedded checkout's
+    // pyproject.toml `version = "..."` (the same source the build stamps).
+    private static string ReadCurrentVersion(string root)
+    {
+        try
+        {
+            string pkg = Path.Combine(root, "data", "hermes-home", "hermes-agent", "pyproject.toml");
+            if (!File.Exists(pkg)) return "(未知)";
+            string text = File.ReadAllText(pkg, Encoding.UTF8);
+            int idx = text.IndexOf("version", StringComparison.Ordinal);
+            if (idx < 0) return "(未知)";
+            int eq = text.IndexOf('=', idx);
+            if (eq < 0) return "(未知)";
+            int q1 = text.IndexOf('"', eq);
+            int q2 = q1 >= 0 ? text.IndexOf('"', q1 + 1) : -1;
+            if (q1 >= 0 && q2 > q1) return text.Substring(q1 + 1, q2 - q1 - 1);
+            return "(未知)";
+        }
+        catch { return "(未知)"; }
+    }
+
+    // ------------------------------------------------------------------ UI
+    // The updater window (adopted from the DeepSeek builder): current/latest
+    // version labels, 检查更新 / 立即更新 buttons, live streaming log box.
+    // A plain double-click opens idle; --check (tray/CLI) runs one check on
+    // load. The update chain runs on a BackgroundWorker so the window stays
+    // responsive and progress streams into the log in real time.
+    internal sealed class UpdateForm : Form
+    {
+        private readonly string _root;
+        private readonly string _diagLog;
+        private readonly bool _checkOnly;
+        private readonly bool _ownsMarker;
+
+        private readonly List<string> _missing = new List<string>();
+        private bool _hasUpdate;
+        private bool _busy;
+
+        private readonly Label _lblCurrent;
+        private readonly Label _lblLatest;
+        private readonly Label _lblStatus;
+        private readonly Button _btnCheck;
+        private readonly Button _btnUpdate;
+        private readonly TextBox _txtLog;
+
+        public UpdateForm(string root, string diagLog, bool checkOnly, bool ownsMarker)
+        {
+            _root = root;
+            _diagLog = diagLog;
+            _checkOnly = checkOnly;
+            _ownsMarker = ownsMarker;
+
+            // Component-missing gate at window build time (adopted from the
+            // DeepSeek updater 2026-08-26): a broken/partial portable disables
+            // the buttons immediately with a clear list, instead of letting the
+            // user click 立即更新 and only then hit a FileNotFoundException.
+            foreach (string need in new[]
+            {
+                Path.Combine(root, "scripts", "Update-Portable.ps1"),
+                Path.Combine(root, "scripts", "Repair-Portable.ps1"),
+                Path.Combine(root, "runtime", "bin", "hermes-cli.cmd"),
+            })
+                if (!File.Exists(need)) _missing.Add(need);
+
+            Text = "Hermes Portable Update";
+            ClientSize = new System.Drawing.Size(660, 480);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterScreen;
+            this.Font = new System.Drawing.Font(System.Drawing.FontFamily.GenericSansSerif, 9f);
+
+            var info = new Panel { Dock = DockStyle.Top, Height = 70 };
+            _lblCurrent = new Label { Text = "当前版本：" + ReadCurrentVersion(root), AutoSize = false, Location = new System.Drawing.Point(8, 8), Size = new System.Drawing.Size(644, 18), TextAlign = System.Drawing.ContentAlignment.MiddleLeft };
+            _lblLatest = new Label { Text = "最新版本：—", AutoSize = false, Location = new System.Drawing.Point(8, 28), Size = new System.Drawing.Size(644, 18), TextAlign = System.Drawing.ContentAlignment.MiddleLeft };
+            // Height 40 (2 lines): status text can be multi-line (e.g. the
+            // component-missing summary) without clipping at 18px.
+            _lblStatus = new Label { Text = "准备就绪：点击“检查更新”", AutoSize = false, Location = new System.Drawing.Point(8, 48), Size = new System.Drawing.Size(644, 40), TextAlign = System.Drawing.ContentAlignment.TopLeft };
+            info.Controls.Add(_lblCurrent);
+            info.Controls.Add(_lblLatest);
+            info.Controls.Add(_lblStatus);
+
+            var logCaption = new Label { Text = "日志", AutoSize = false, Dock = DockStyle.Top, Height = 20, Padding = new Padding(8, 2, 0, 0) };
+            _txtLog = new TextBox
+            {
+                Multiline = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.Vertical,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(8, 2, 8, 2),
+                BackColor = System.Drawing.Color.White,
+            };
+
+            var btnPanel = new Panel { Dock = DockStyle.Bottom, Height = 52, Padding = new Padding(12, 8, 12, 8) };
+            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, RightToLeft = RightToLeft.Yes, WrapContents = false };
+            _btnCheck = new Button { Text = "检查更新", Width = 110, Height = 34 };
+            _btnUpdate = new Button { Text = "立即更新", Width = 110, Height = 34, Enabled = false };
+            _btnCheck.Click += delegate { CheckForUpdates(); };
+            _btnUpdate.Click += delegate { RunUpdate(); };
+            flow.Controls.Add(_btnUpdate); // first control -> rightmost
+            flow.Controls.Add(_btnCheck);
+            btnPanel.Controls.Add(flow);
+            AcceptButton = _btnCheck;
+
+            Controls.Add(_txtLog);
+            Controls.Add(logCaption);
+            Controls.Add(info);
+            Controls.Add(btnPanel);
+
+            if (!_ownsMarker && !_checkOnly)
+            {
+                SetStatus("另一个 Update.exe 正在运行，请等待其完成后再试。");
+                _btnCheck.Enabled = false;
+                _btnUpdate.Enabled = false;
+            }
+            else if (_missing.Count > 0)
+            {
+                // Summary (fits the 2-line status label) + full paths in the
+                // log box so nothing is clipped.
+                SetStatus("便携包组件缺失（" + _missing.Count + " 个）：请重新解压发行包或运行 Repair 后重试。");
+                _btnCheck.Enabled = false;
+                _btnUpdate.Enabled = false;
+                AppendLog("缺失组件：");
+                foreach (string m in _missing) AppendLog("  " + m);
+            }
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // --check (tray "检查更新"): open the window and run one check.
+            if (_checkOnly) BeginInvoke(new Action(CheckForUpdates));
+        }
+
+        private void SetStatus(string text)
+        {
+            if (InvokeRequired) { try { BeginInvoke(new Action<string>(SetStatus), text); } catch { } return; }
+            _lblStatus.Text = text;
+        }
+
+        private void AppendLog(string text)
+        {
+            if (InvokeRequired) { try { BeginInvoke(new Action<string>(AppendLog), text); } catch { } return; }
+            if (_txtLog.TextLength > 60000) _txtLog.Clear();
+            _txtLog.AppendText(text + "\r\n");
+        }
+
+        private void SetBusy(bool busy)
+        {
+            _busy = busy;
+            _btnCheck.Enabled = !busy && _missing.Count == 0;
+            _btnUpdate.Enabled = !busy && _hasUpdate && _missing.Count == 0;
+        }
+
+        // ---------------------------------------------------------- check
+        private void CheckForUpdates()
+        {
+            if (_busy) return;
+            SetBusy(true);
+            SetStatus("正在检查更新...");
+            var worker = new System.ComponentModel.BackgroundWorker();
+            worker.DoWork += delegate(object s, System.ComponentModel.DoWorkEventArgs e)
+            {
+                // Official `hermes update --check`: fetch and report without
+                // installing. Output lines: "→ Fetching from origin...",
+                // "✓ Already up to date." or "⚕ Update available: N commits".
+                // Capture the stream so the completion handler can classify
+                // the result (up-to-date vs update-available) and enable the
+                // 立即更新 button ONLY when an update actually exists —
+                // mirroring the DeepSeek updater's version-equality gate.
+                string cli = Path.Combine(_root, "runtime", "bin", "hermes-cli.cmd");
+                var captured = new StringBuilder();
+                RunStreaming(cli, "update --check", _root, delegate(string line)
+                {
+                    AppendLog(line);
+                    try { lock (captured) { captured.AppendLine(line); } } catch { }
+                });
+                string all = captured.ToString();
+                bool upToDate = all.IndexOf("Already up to date", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool available = all.IndexOf("Update available", StringComparison.OrdinalIgnoreCase) >= 0;
+                e.Result = upToDate ? "uptodate" : (available ? "available" : "unknown");
+            };
+            worker.RunWorkerCompleted += delegate(object s, System.ComponentModel.RunWorkerCompletedEventArgs e)
+            {
+                try
+                {
+                    if (e.Error != null)
+                    {
+                        _hasUpdate = false;
+                        SetStatus("检查失败：" + e.Error.Message);
+                        AppendLog("check failed: " + e.Error);
+                    }
+                    else
+                    {
+                        string verdict = e.Result as string;
+                        if (verdict == "uptodate")
+                        {
+                            _hasUpdate = false;
+                            _lblLatest.Text = "最新版本：已是最新";
+                            SetStatus("已是最新版本，无需更新。");
+                        }
+                        else if (verdict == "available")
+                        {
+                            _hasUpdate = true;
+                            _lblLatest.Text = "最新版本：有可用更新（详见日志）";
+                            SetStatus("发现新版本。点“立即更新”开始更新。");
+                        }
+                        else
+                        {
+                            _hasUpdate = false;
+                            _lblLatest.Text = "最新版本：—";
+                            SetStatus("检查完成但无法判定结果（见日志）。");
+                        }
+                    }
+                    SetBusy(false);
+                }
+                catch (Exception ex) { try { File.AppendAllText(_diagLog, "check completion: " + ex + "\r\n"); } catch { } }
+            };
+            worker.RunWorkerAsync();
+        }
+
+        // ---------------------------------------------------------- update
+        private void RunUpdate()
+        {
+            if (_busy) return;
+            SetBusy(true);
+            SetStatus("正在更新...");
+            var worker = new System.ComponentModel.BackgroundWorker();
+            worker.DoWork += delegate(object s, System.ComponentModel.DoWorkEventArgs e)
+            {
+                e.Result = RunFullUpdate(_root, _diagLog, delegate(string line) { AppendLog(line); });
+            };
+            worker.RunWorkerCompleted += delegate(object s, System.ComponentModel.RunWorkerCompletedEventArgs e)
+            {
+                try
+                {
+                    if (e.Error != null)
+                    {
+                        SetStatus("更新失败：" + e.Error.Message);
+                        AppendLog("update error: " + e.Error);
+                        try { File.AppendAllText(_diagLog, "update error: " + e.Error + "\r\n"); } catch { }
+                    }
+                    else
+                    {
+                        int rc = (int)e.Result;
+                        if (rc == 0)
+                        {
+                            SetStatus("更新完成");
+                            _btnCheck.Enabled = false;
+                            _btnUpdate.Enabled = false;
+                            // Ask before closing: the app was relaunched by the
+                            // chain; keep the window so the log stays readable.
+                            Close();
+                        }
+                        else
+                        {
+                            SetStatus("更新失败（退出码 " + rc + "），见日志与诊断文件。");
+                        }
+                    }
+                    SetBusy(false);
+                }
+                catch (Exception ex) { try { File.AppendAllText(_diagLog, "update completion: " + ex + "\r\n"); } catch { } }
+            };
+            worker.RunWorkerAsync();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            // Closing mid-update would orphan the child process tree; the next
+            // run's process gate cleans it, but warn first (same as DeepSeek).
+            if (_busy)
+            {
+                DialogResult r = MessageBox.Show(
+                    "更新正在进行中，关闭窗口不会撤销已完成的操作。\n\n确定要关闭吗？",
+                    "Hermes Portable Update", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (r != DialogResult.Yes) { e.Cancel = true; return; }
+            }
+            base.OnFormClosing(e);
+        }
     }
 }

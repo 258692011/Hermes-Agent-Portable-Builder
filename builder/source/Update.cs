@@ -688,6 +688,37 @@ internal static class Program
         int attachRc = RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " checkout main", root, true, out co);
         if (attachRc != 0)
             RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " checkout -B main HEAD", root, true, out co);
+        // Shallow-boundary consistency repair (observed 2026-08-26, second
+        // failure class on the same deploy): a broken .git/shallow — HEAD is
+        // NOT listed as a boundary while its parent object is missing from
+        // the store — makes EVERY git history walk fail ("Could not read
+        // <sha> ... Failed to traverse parents of commit <sha>"), so the
+        // official updater's git steps exit 1 with "(no output)" even though
+        // the fetch already landed the new commits on disk. The reset/checkout
+        // repair above only fixes the working tree; it cannot fix object
+        // corruption. Detect with a one-commit log probe (exit 128 on broken,
+        // 0 on healthy — whether shallow or full history), then repair by
+        // advancing the source directly: `fetch --depth 1 origin main`
+        // re-establishes a consistent boundary (best-effort; after a failed
+        // update the origin/main ref and its objects are already local, so
+        // the reset below also works offline), then `reset --hard
+        // origin/main` moves HEAD to the fetched tip WITHOUT walking history
+        // (trees only) and keeps the repo shallow. headBefore was captured
+        // BEFORE this repair, so if the official update later fails, the
+        // uv-fallback HEAD-advance proof still passes truthfully (the source
+        // DID advance).
+        int histRc = RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " log -1 --oneline HEAD", root, true, out co);
+        if (histRc != 0)
+        {
+            log("→ 修复损坏的 git 历史（浅克隆边界不一致）...");
+            RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " fetch --depth 1 origin main", root, true, out co);
+            RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " reset --hard origin/main", root, true, out co);
+            histRc = RunCaptured(gitBin, "-C " + Quote(checkoutDir) + " log -1 --oneline HEAD", root, true, out co);
+            if (histRc == 0)
+                log("✓ git 历史已修复（源码前进到 origin/main）。");
+            else
+                log("⚠ git 历史修复后仍不可读，继续尝试官方更新。");
+        }
         // hermes-cli.cmd already wraps `python -m hermes_cli.main %*`, so
         // pass the bare subcommand; a redundant "-m hermes_cli.main" only
         // works by accident (it parses as --model + parse_known_args).
@@ -777,19 +808,10 @@ internal static class Program
         log("→ 桌面同步...");
         rc = RunStreaming("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; & '" + updater.Replace("'", "''") + "' -Stage SyncDesktop\"", root, log);
         if (rc != 0) return Fail("桌面同步", rc, "Portable 桌面应用同步失败，现有版本不受影响。", "", diagLog);
-        // No completion dialog: launch the app directly. Step 5 (desktop
-        // sync) already killed the root processes; start Hermes.exe fresh.
-        // Best-effort: if the launch fails, fall back to the informational
-        // dialog so the user is not left wondering why nothing opened.
-        try
-        {
-            Process.Start(Path.Combine(root, "Hermes.exe"));
-        }
-        catch (Exception launchEx)
-        {
-            MessageBox.Show("更新已完成，但无法自动启动 Hermes：\n" + launchEx.Message + "\n\n请手动启动 Hermes.exe。",
-                "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+        // No relaunch here: the completion dialog runs on the UI thread
+        // (RunWorkerCompleted) and asks 是否立即重启 (Yes/No), mirroring the
+        // DeepSeek Harness updater (user request 2026-08-26): Yes restarts
+        // Hermes.exe and closes; No keeps the window open.
         return Finish(0, "Update complete.");
     }
 
@@ -1042,14 +1064,33 @@ internal static class Program
                         if (rc == 0)
                         {
                             SetStatus("更新完成");
-                            // Release the busy flag BEFORE Close(): OnFormClosing
-                            // pops a busy-confirmation dialog whenever _busy is
-                            // true, so the old order (Close() then SetBusy(false))
+                            // Completion dialog before releasing the busy flag
+                            // (mirrors the DeepSeek Harness updater, 2026-08-26
+                            // user request): Yes -> relaunch Hermes.exe and
+                            // close; No -> keep the window open. Release the
+                            // busy flag BEFORE Close(): OnFormClosing pops a
+                            // busy-confirmation dialog whenever _busy is true,
+                            // so the old order (Close() then SetBusy(false))
                             // showed it after every successful update.
+                            DialogResult rr = MessageBox.Show(
+                                "更新完成：" + ReadCurrentVersion(_root) + "\n\n是否立即重启 Hermes？",
+                                "Hermes Update", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
                             SetBusy(false);
                             _btnCheck.Enabled = false;
                             _btnUpdate.Enabled = false;
-                            Close();
+                            if (rr == DialogResult.Yes)
+                            {
+                                try
+                                {
+                                    Process.Start(Path.Combine(_root, "Hermes.exe"));
+                                }
+                                catch (Exception launchEx)
+                                {
+                                    MessageBox.Show("更新已完成，但无法自动启动 Hermes：\n" + launchEx.Message + "\n\n请手动启动。",
+                                        "Hermes Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                }
+                                Close();
+                            }
                         }
                         else
                         {

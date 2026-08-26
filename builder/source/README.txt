@@ -31,7 +31,7 @@ Bundled runtime: Python {{PYTHON_VERSION}}, Node.js {{NODE_VERSION}}, Git for Wi
 NousResearch/hermes-agent。Portable 维护脚本（scripts\ 下的修复/补丁/同步/验证脚本）独立保存于
 官方 Git checkout 之外，因此官方更新不会删除启动器、修复脚本或 MCP/pywin32 bootstrap。更新器会重新
 读取官方 scripts\install.ps1 中的 PythonVersion，按该版本选择器更新内置 Python。更新成功后
-不会弹出完成对话框，而是直接重新启动 Hermes.exe；只有自动启动失败或更新出错时才会提示。
+弹出对话框询问是否立即重启 Hermes（是：重启并关闭更新器；否：保持更新器窗口打开）；只有自动启动失败或更新出错时才会提示。
 更新前建议备份整个 data 目录。
 更新失败时，Update.exe 会弹出对话框说明失败原因（如网络无法连接 GitHub），
 并写入诊断日志：data\hermes-home\logs\Update.exe-diagnostic.log

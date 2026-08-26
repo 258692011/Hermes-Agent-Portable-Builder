@@ -975,6 +975,9 @@ internal static class Program
             if (_busy) return;
             SetBusy(true);
             SetStatus("正在检查更新...");
+            // A fresh check starts a fresh log: repeated 检查更新 clicks used
+            // to stack every check's output below the previous one (2026-08-26).
+            _txtLog.Clear();
             var worker = new System.ComponentModel.BackgroundWorker();
             worker.DoWork += delegate(object s, System.ComponentModel.DoWorkEventArgs e)
             {
@@ -1042,6 +1045,8 @@ internal static class Program
             if (_busy) return;
             SetBusy(true);
             SetStatus("正在更新...");
+            // Fresh log for the update stream (same stacking fix as the check).
+            _txtLog.Clear();
             var worker = new System.ComponentModel.BackgroundWorker();
             worker.DoWork += delegate(object s, System.ComponentModel.DoWorkEventArgs e)
             {

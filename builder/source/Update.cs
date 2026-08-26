@@ -333,7 +333,7 @@ internal static class Program
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            CreateNoWindow = false
+            CreateNoWindow = true
         };
         using (var p = Process.Start(psi))
         {

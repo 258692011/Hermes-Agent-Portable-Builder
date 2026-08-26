@@ -882,7 +882,7 @@ if (-not (Test-Path $officialIcon)) { throw "Official Hermes Desktop icon is mis
 Ensure-Utf8Bom (Join-Path $Source 'Hermes.cs')
 Ensure-Utf8Bom (Join-Path $Source 'Update.cs')
 Invoke-NativeChecked 'Hermes launcher compilation' { & $csc /nologo /target:winexe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Hermes.exe" /reference:System.Windows.Forms.dll (Join-Path $Source 'Hermes.cs') }
-Invoke-NativeChecked 'Update launcher compilation' { & $csc /nologo /target:exe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Update.exe" /reference:System.Windows.Forms.dll (Join-Path $Source 'Update.cs') }
+Invoke-NativeChecked 'Update launcher compilation' { & $csc /nologo /target:winexe /platform:anycpu /optimize+ "/win32icon:$officialIcon" "/out:$Stage\Update.exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll (Join-Path $Source 'Update.cs') }
 
 $package = Get-Content (Join-Path $Repo 'pyproject.toml') -Raw
 $hermesVersion = [regex]::Match($package, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value

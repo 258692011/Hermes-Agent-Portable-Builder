@@ -618,6 +618,14 @@ function Convert-PackagedGitToShallow([string]$Checkout, [string]$Repo) {
     }
     Invoke-NativeChecked 'Expire reflog' { & git.exe -C $Checkout reflog expire --expire=now --all | Out-Null }
     Invoke-NativeChecked 'GC prune history objects' { & git.exe -C $Checkout gc --prune=now --aggressive | Out-Null }
+    # PITFALL (2026-08-27): gc packs refs/heads/main into packed-refs and leaves
+    # refs/heads/ empty. An overlay extraction (7za -y) over an older deployment
+    # then keeps the OLD loose refs/heads/main file (loose refs shadow packed-refs),
+    # so the packaged git silently resolves to the previous release's commit and
+    # every `git status` / `hermes update` sees a dirty tree. Write a loose
+    # refs/heads/main pinned to the packaged commit so every future overlay
+    # overwrites the stale loose ref and the deployed source stays clean.
+    Invoke-NativeChecked 'Write packaged loose refs/heads/main' { & git.exe -C $Checkout update-ref refs/heads/main $commit | Out-Null }
 }
 
 # Release gate (merged into the build script 2026-08-10): a broad

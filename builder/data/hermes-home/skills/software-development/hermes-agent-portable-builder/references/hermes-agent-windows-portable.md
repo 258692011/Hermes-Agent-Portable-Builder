@@ -1389,3 +1389,38 @@ git config --global --add safe.directory D:/path/to/repo   # per repo, once
 Add upstream, stage 源码, and 已部署源码 paths. Harmless to apply
 proactively after a machine rebuild; the fix message git prints is the exact
 command to run.
+
+---
+
+# Appendix: Upstream READY-sentinel regression (2026-08-27)
+
+## Symptom (every desktop launch fails)
+
+`desktop.log` sequence: backend spawn → `HERMES_BACKEND_READY port=N` + `  Hermes backend listening on 127.0.0.1:N` (both are the main process FORWARDING child output, `[hermes]`-prefixed) → 90s silence → `[boot] Desktop boot failed: Timed out waiting for Hermes backend port announcement (90000ms)` (electron-main.mjs:1981). `gui.log`: web_server mounts + Desktop cron starts, but NO `tui_gateway.ws: ws accepted` line ever appears (working sessions log 2). Renderer keeps retrying `refreshProfiles` → "Error invoking remote method 'hermes:api': Timed out...". Retry button (bootstrap reset) restarts the backend, same timeout.
+
+## Root cause (upstream, not the portable)
+
+- Official commit `6d4e851d8` (2026-08-27T05:14Z, "fix(serve): bounded flush-on-SIGTERM + periodic incremental session flush", `hermes_cli/web_server.py` +13 / `tui_gateway/server.py` +186) added a stdout redirect in the serve path. The `HERMES_BACKEND_READY` sentinel (web_server.py `print(f"{ready_token} port={actual_port}", flush=True)`) then lands on STDERR.
+- Electron `apps/desktop/electron/backend-ready.ts` `waitForDashboardPort` attaches ONLY `child.stdout.on('data', …)` matching `_READY_RE = /^HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)/m`. stderr content never matches → 90s timeout.
+- `backend.readyFile` (the ready-FILE fallback channel, `HERMES_DESKTOP_READY_FILE` env + `waitForDashboardReadyFile`) is NEVER assigned anywhere in upstream code — dead code, so the stdout path is the only path used.
+- Proven not-portable: backend source/venv byte-identical to stage; reproduced after a clean rebuild (upstream a9611f3) + fresh overlay deploy; import probe OK; backend binds and serves HTTP.
+
+## Official tracking (as of 2026-08-27)
+
+Issues: #96279 (exact error), #96282 (sentinel to stderr after 6d4e851d8), #96294 (stderr sentinel), #96295 (Windows), #96297 (repair-loop), #96291 (Linux), #96280 (readyFile channel fixes it), #62698 (older related ECONNRESET variant). Fix PRs: #96284 / #96307 ("announce sentinel on fd 1, not redirected sys.stdout"), #92631 (desktop: write sentinel to fd 1). All OPEN/unmerged; official main tip still broken.
+
+## User decision and portable status
+
+2026-08-27: pin `upstream` to `d0351e32` (last good commit, 8/26) until a fix merges; then restore the normal sync contract. Build/packaging otherwise unchanged.
+
+## Verification recipe
+
+```powershell
+# probe which stream carries the sentinel (deployed or stage backend):
+cmd /c "set HERMES_HOME=...&& set HERMES_PORTABLE_SITE_PACKAGES=...&& set PYTHONPATH=...&& `"<py>`" -m hermes_cli.main serve --host 127.0.0.1 --port 0 1>out.txt 2>err.txt"
+# expect: HERMES_BACKEND_READY + "  Hermes backend listening on" in err.txt, out.txt empty
+```
+
+## Pinning mechanics
+
+GitHub refuses `git fetch origin <sha>` ("couldn't find remote ref") and `git fetch <local-shallow-path> <sha>`; use `git fetch --shallow-since=<date> origin main` (deepens the shallow mirror past the target commit) then `git reset --hard <sha>`. Verify `git log --oneline -1` = target and `git status --porcelain` empty. Hermes.ps1 does NOT auto-sync upstream at build start (sync is the operator's manual pre-build step), so a pin survives the build.

@@ -8,6 +8,7 @@ metadata:
   hermes:
     tags: [portable, dsh, deepseek-harness, windows, builder]
     related_skills: [hermes-agent-portable-builder]
+    category: software-development
 ---
 
 # DeepSeek Harness Portable Builder

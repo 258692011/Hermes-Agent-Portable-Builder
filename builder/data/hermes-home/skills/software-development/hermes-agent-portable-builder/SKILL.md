@@ -8,6 +8,7 @@ platforms: [windows]
 metadata:
   hermes:
     tags: [electron, packaging, portable, backend, windows]
+    related_skills: [deepseek-harness-portable-builder]
     category: software-development
 ---
 

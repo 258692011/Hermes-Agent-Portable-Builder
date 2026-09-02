@@ -112,7 +112,7 @@ function Assert-Upstream {
     # If the folder is missing or empty, clone it from the official
     # repository. NOTE (2026-08-23): upstream/ is now a depth-1 SHALLOW mirror
     # of origin/main (fetch --depth 1 --no-tags + reset --hard origin/main;
-    # .git ~69MB instead of 1.2GB+) — the packaged shallow-clone fetch (L595)
+    # .git ~69MB instead of 1.2GB+) — the packaged shallow-clone fetch (inside Convert-PackagedGitToShallow)
     # and the release gates all resolve objects from this shallow tip, and
     # official `hermes update` preserves the shallow boundary (update_cmd.py
     # depth_args). Keep the shallow flags on every sync: a plain fetch would
@@ -533,14 +533,13 @@ function Protect-CaseCollisionEntries([string]$Checkout) {
     # skip-worktree so status stays clean; the flag then ships inside the
     # packed .git index, which also keeps the user-side `hermes update`
     # local-changes check clean (same failure class as the CRLF trap).
-    # WHY TWO CALL SITES (staged ~L771 and packaged ~L826): the flag lives
+    # WHY TWO CALL SITES (the staged status gate and the packaged status gate): the flag lives
     # per-entry inside .git\index, NOT in git config. A plain `git reset
     # --hard` PRESERVES it (verified 2026-08-18), but the packaged-checkout
-    # block (1) replaces the whole .git with a fresh copy from upstream at
-    # L782-784 (that index carries no flags — upstream is a read-only mirror
+    # block (1) replaces the whole .git with a fresh copy from upstream (the PackedGit re-copy block below; that index carries no flags — upstream is a read-only mirror
     # we never mark), and (2) `git rm -r --cached .` + `git reset --hard`
     # rebuilds the index FROM HEAD, dropping any surviving flag. So the
-    # packaged status gate at L798 must re-run this protection after the
+    # packaged status gate must re-run this protection after the
     # index rewrite. Each call re-checks both variants because which one
     # Windows materializes can differ per index rebuild (observed: stage
     # check hid the lower-case entry, packaged check hid the upper-case).

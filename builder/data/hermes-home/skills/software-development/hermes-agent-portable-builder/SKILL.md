@@ -17,7 +17,7 @@ Use this skill to research or implement relocatable Electron distributions, espe
 
 This is a user-project skill for the Hermes Portable Builder, not an official bundled Hermes skill. Its canonical skill source is `D:\Hermes-Agent-Portable-Builder\builder\data\hermes-home\skills\software-development\hermes-agent-portable-builder`, while build-only implementation lives separately under `builder`. Releases install this skill tree under `<portable-root>\data\hermes-home\skills\software-development\hermes-agent-portable-builder`; executable maintenance helpers live once under `<portable-root>\scripts`.
 
-术语约定: 两份副本或本地与远端内容不一致，一律称「差异」(divergence)，不要用「漂移」(drift) 之类的说法。
+术语约定: 两份副本或本地与远端内容不一致，一律称「差异」(divergence)，不要用「漂移」(drift) 之类的说法。正文一律写**完整明确的名称**（技能名/仓库路径/文件/组件名），**禁止口语化即席指代**（如「…侧」「那边」这类未定义说法；observed 2026-09-04：「deepseek 侧」曾在本技能正文出现、难以理解，已全部改为完整名称并全文清零）。
 
 ## Project Release Contract
 
@@ -28,7 +28,7 @@ This is a user-project skill for the Hermes Portable Builder, not an official bu
 - **每次构建全新 runtime**：不读任何旧 Portable 或运行时 seed 环境变量；copy 系统 uv/Node/Git 当可用，否则下载；隔离 Python + fresh locked venv 在 build 下。uv pin（2026-08-09 起无单独 SHA256 校验：zip CRC + HTTPS + 3x retry）；`--no-install-project --link-mode copy` 同步依赖，防 editable build-root 映射进 venv。
 - 目标仅 Windows x64（构建期拒绝其他架构）。
 - 构建代码/技能/部署副本保持 aligned：行为变化时同步改 README.txt、模板、launchers、updater、build script、references。
-- **Ordering contract: 技能变更要在构建/打包前写回并同步进 stage**（observed 2026-08-26）。构建 mid-build 把 `builder\data\hermes-home\skills\...` 复制进 stage；此后编辑不会进产物除非手动重同步。必须随包发布的技能变更序列：(1) patch canonical builder 副本，(2) cp 进 stage 对应路径，(3) 才归档；(4) 归档后验证 ZIP 内 SKILL.md md5 == canonical。本技能与 deepseek-harness-portable-builder 技能互有 cross-link。
+- **Ordering contract: 技能变更要在构建/打包前写回并同步进 stage**（observed 2026-08-26）。构建 mid-build 把 `builder\data\hermes-home\skills\...` 复制进 stage；此后编辑不会进产物除非手动重同步。必须随包发布的技能变更序列：(1) patch canonical builder 副本，(2) cp 进 stage 对应路径，(3) 才归档；(4) 归档后验证 ZIP 内 SKILL.md md5 == canonical。**纯技能/文案变更无需整轮构建**（observed 2026-09-04，规则对齐 deepseek-harness-portable-builder 技能，单向 cross-reference——该技能正文暂无回链）：patch canonical → cp 两个文件进 stage → 只跑归档 + ZIP md5 验证即可（前提：stage 是最近一次构建后的干净树，未启动过、无运行态数据——见 §14 Sanitize release state）；整轮 `Hermes.ps1` 只在代码/上游/运行时变化时跑。
 - 打包 Portable 内维护脚本唯一位置：`<portable-root>\scripts\`（Update-Portable.ps1 含 `Patch|PatchRemove|SyncDesktop|WriteDesktopStamp` stages；Repair-Portable.ps1 自包含无参修复；Verify-Portable.ps1 校验）。技能目录不携带 scripts/templates/assets。
 - 测试任何能杀进程的维护脚本（Repair 无 `-KeepProcesses`、SyncDesktop、Update.exe）**必须** `-KeepProcesses` 或只读模式（`-ShowOfficialPythonVersion`）；2026-08-10 无参测试曾杀死活着的桌面应用。测试后验证 Hermes 进程存活。
 - Prefer bounded, high-signal verification：测试/修复路径反复失败或代价失衡时，停止、清理现场、修根因、只重跑相关门禁。
@@ -47,10 +47,10 @@ Trigger: you hit an error, a wrong assumption, a failed command, a user correcti
 How to record:
 
 1. **Where**: default to `references/hermes-agent-windows-portable.md`（按主题进对应 appendix，没有就新增 appendix）。只有该教训是「每次必须遵守的操作规则/门禁」时才在主 SKILL.md 加 1-3 行规则（可含指向 references/代码函数名的指针）。主文件不再收纯考古（日期→症状→根因→修复的已 FIXED bug 史）——那只进 references。
-2. **What**: symptom (exact error/behavior), root cause, the proven correct approach, and a one-line verification note. Name real files/functions where useful — but NOT line numbers (they shift; the skill itself has drifted stale twice).
-3. **Both copies**: the skill ships twice — `builder\data\hermes-home\skills\software-development\hermes-agent-portable-builder\` (canonical source) and the active profile copy (`<portable-root>\data\hermes-home\skills\...`, what Hermes actually loads). Patch the builder copy, copy both files to the profile copy, and verify `diff` reports them byte-identical before finishing.
+2. **What**: symptom (exact error/behavior), root cause, the proven correct approach, and a one-line verification note. Name real files/functions where useful — but NOT line numbers (they shift; the skill itself has drifted stale twice). 行文措辞遵守「术语约定」段（见上文）。
+3. **Copies**: three materializations, all byte-identical — builder canonical (`builder\data\hermes-home\skills\software-development\hermes-agent-portable-builder\`), the active profile copy (本机当前部署为 `C:\Hermes-Agent-Portable\data\hermes-home\skills\...`，Hermes 实际加载；若存在多份部署，每份活动 profile 都要同步), and the mid-build stage copy (`stage\Hermes-Agent-Portable\data\hermes-home\skills\...`). Patch the builder copy, copy BOTH files (SKILL.md + `references\hermes-agent-windows-portable.md`) to the profile copy always and into the stage copy whenever a build/pack must ship, and verify `diff` reports them byte-identical before finishing.
 4. **Scope**: record only lessons that would save time if the same mistake recurs. When unsure whether a lesson is worth recording, record it — a concise pitfall is cheap. When a pitfall's forensic narrative grows longer than its actionable core, condense to the rule and keep deep detail in `references/` only.
-5. **Report**: in the final reply, state what was added and that both copies are in sync.
+5. **Report**: in the final reply, state what was added and that all copies (builder / active profile / stage) are byte-identical.
 
 ## User Trigger Rules (user-controlled)
 

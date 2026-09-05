@@ -614,7 +614,7 @@ function Sync-PortableDesktop {
         $tuiNeeded = $true
         try {
             $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
-            $tuiProbe = (& $Python -c "from pathlib import Path; from hermes_cli.main import _tui_need_rebuild; print(_tui_need_rebuild(Path(r'$Repo\ui-tui')))" 2>$null | Select-Object -Last 1)
+            $tuiProbe = (& $Python -c "from pathlib import Path; from hermes_cli.main_tui_launch import _tui_need_rebuild; print(_tui_need_rebuild(Path(r'$Repo\ui-tui')))" 2>$null | Select-Object -Last 1)
             # A non-zero native exit is NOT a PS exception under 5.1 — check
             # $LASTEXITCODE so a broken venv rebuilds instead of silently
             # shipping a stale/missing bundle (2026-08-22).
@@ -665,7 +665,7 @@ function Sync-PortableDesktop {
     try {
         $env:HERMES_HOME = $HermesHome
         $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
-        $webProbe = (& $Python -c "from pathlib import Path; from hermes_cli.main import _web_ui_build_needed; print(_web_ui_build_needed(Path(r'$Repo\web')))" 2>$null | Select-Object -Last 1)
+        $webProbe = (& $Python -c "from pathlib import Path; from hermes_cli.main_web_build import _web_ui_build_needed; print(_web_ui_build_needed(Path(r'$Repo\web')))" 2>$null | Select-Object -Last 1)
         # Non-zero native exit = probe failed -> rebuild (conservative, 2026-08-22).
         if ($LASTEXITCODE -ne 0) { $webNeeded = $true } else { $webNeeded = ($webProbe -eq 'True') }
     } catch { $webNeeded = $true }
@@ -697,7 +697,7 @@ function Sync-PortableDesktop {
             try {
                 $env:HERMES_HOME = $HermesHome
                 $env:PYTHONPATH = "$Repo;$env:PYTHONPATH"
-                Invoke-NativeChecked 'Web UI build stamp' { & $Python -c "from pathlib import Path; from hermes_cli.main import _write_web_ui_build_stamp; _write_web_ui_build_stamp(Path(r'$Repo'), Path(r'$Repo\web'))" }
+                Invoke-NativeChecked 'Web UI build stamp' { & $Python -c "from pathlib import Path; from hermes_cli.main_web_build import _write_web_ui_build_stamp; _write_web_ui_build_stamp(Path(r'$Repo'), Path(r'$Repo\web'))" }
             } catch {
                 Write-Warning "Web UI build stamp failed ($($_.Exception.Message)); first dashboard launch after update will rebuild the frontend once."
             }

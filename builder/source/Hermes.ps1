@@ -1019,7 +1019,7 @@ Invoke-NativeChecked 'Desktop build stamp' { & powershell.exe -NoProfile -Execut
 # stamp written before that point hashes CRLF content and mismatches on the
 # user's first launch (triggering a runtime npm install + rebuild). The stamp
 # must be produced by the same code that reads it
-# (hermes_cli.main._write_web_ui_build_stamp), so run it through the staged
+# (hermes_cli.main_web_build._write_web_ui_build_stamp), so run it through the staged
 # venv against the final staged checkout.
 $StageHome = Join-Path $Stage 'data\hermes-home'
 $StageVenvPython = Join-Path $Checkout 'venv\Scripts\python.exe'
@@ -1028,7 +1028,7 @@ $oldPythonPath = $env:PYTHONPATH
 try {
     $env:HERMES_HOME = $StageHome
     $env:PYTHONPATH = "$Checkout;$env:PYTHONPATH"
-    Invoke-NativeChecked 'Web UI build stamp' { & $StageVenvPython -c "from pathlib import Path; from hermes_cli.main import _write_web_ui_build_stamp; _write_web_ui_build_stamp(Path(r'$Checkout'), Path(r'$Checkout\web'))" }
+    Invoke-NativeChecked 'Web UI build stamp' { & $StageVenvPython -c "from pathlib import Path; from hermes_cli.main_web_build import _write_web_ui_build_stamp; _write_web_ui_build_stamp(Path(r'$Checkout'), Path(r'$Checkout\web'))" }
 } finally {
     $env:HERMES_HOME = $oldHermesHome
     $env:PYTHONPATH = $oldPythonPath

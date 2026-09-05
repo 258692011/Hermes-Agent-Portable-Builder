@@ -1,4 +1,14 @@
 {
+  "bootstrapDependencies": {
+    "pipx": {
+      "package": "pipx==1.16.5",
+      "version": "1.16.5"
+    },
+    "pnpm": {
+      "package": "pnpm@10.24.0",
+      "version": "10.24.0"
+    }
+  },
   "capabilities": [
     {
       "name": "jadx",
@@ -67,6 +77,14 @@
       ]
     },
     {
+      "name": "binaryninja",
+      "bootstrapKind": "manual",
+      "docsUrl": "https://binary.ninja/",
+      "canAutoInstall": false,
+      "verifyCommand": "binaryninja",
+      "manualInstallHint": "Binary Ninja is commercial software. Obtain a valid Vector 35 license and install it manually. Optional community MCP plugins must pass the skill-supply-chain review and remain bound to loopback by default."
+    },
+    {
       "name": "reqable-mcp",
       "bootstrapKind": "npm-mcp",
       "npmPackage": "reqable-mcp-server@1.0.1",
@@ -108,6 +126,19 @@
       "pinnedVersion": "0.3.4"
     },
     {
+      "name": "xquik-mcp",
+      "bootstrapKind": "remote-http-mcp",
+      "mcpNames": [
+        "xquik"
+      ],
+      "mcpUrl": "https://xquik.com/mcp",
+      "docsUrl": "https://docs.xquik.com/mcp/overview",
+      "canAutoInstall": true,
+      "pinPolicy": "remote-service-no-local-install",
+      "verificationMode": "registration-only",
+      "note": "Registers the first-party remote MCP URL only. OAuth is completed in the selected MCP client. No local package, bridge, or credential is installed."
+    },
+    {
       "name": "anything-analyzer",
       "bootstrapKind": "local-http-mcp",
       "repoUrl": "https://github.com/Mouseww/anything-analyzer",
@@ -127,6 +158,7 @@
       "servicePort": 23816,
       "docsUrl": "https://github.com/Mouseww/anything-analyzer",
       "canAutoInstall": true,
+      "pinnedCommit": "0ed4791688e5186da051c85eb7ddfe4639e14fd2",
       "verificationMode": "service-or-registration"
     },
     {
